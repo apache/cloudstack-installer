@@ -84,6 +84,19 @@ check_root() {
     fi
 }
 
+check_available_memory() {
+    MIN_RAM_KB=$((8 * 1024 * 1024))  # 8 GB in KB
+    TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+
+    # Check if RAM is within the desired range
+    if [ "$TOTAL_RAM_KB" -ge "$MIN_RAM_KB" ]; then
+        log "RAM check passed: $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB"
+    else
+        error_exit "RAM check failed: System has $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB RAM"
+        exit 1
+    fi
+}
+
 # Function to detect the OS type and pkg mgr
 detect_os() {
     if [[ ! -f /etc/os-release ]]; then
@@ -114,42 +127,56 @@ detect_os() {
 }
 
 configure_cloudstack_repo() {
-    echo "Configuring CloudStack repository..."
+    {
+        echo "Configuring CloudStack repository..."
 
-    case "$OS_TYPE" in
-        ubuntu|debian)
-            # Add CloudStack's signing key
-            curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | tee /etc/apt/keyrings/cloudstack.gpg > /dev/null
-            
-            # Add CloudStack repository
-            echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu $OS_VERSION $CS_VERSION" | tee /etc/apt/sources.list.d/cloudstack.list
+        case "$OS_TYPE" in
+            ubuntu|debian)
+                # Add CloudStack's signing key
+                curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | tee /etc/apt/keyrings/cloudstack.gpg > /dev/null
+                
+                # Add CloudStack repository
+                echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu noble $CS_VERSION" | tee /etc/apt/sources.list.d/cloudstack.list
 
-            # Update the system
-            apt-get update
-            ;;
-        rhel|centos|fedora|rocky|alma)
-            # Add CloudStack's signing key
-            curl -fsSL https://download.cloudstack.org/release.asc | tee /etc/pki/rpm-gpg/CloudStack.asc
-            
-            # Add CloudStack repository
-            echo "[cloudstack]" | tee /etc/yum.repos.d/cloudstack.repo
-            echo "name=CloudStack Repo" | tee -a /etc/yum.repos.d/cloudstack.repo
-            echo "baseurl=https://download.cloudstack.org/centos/$OS_VERSION" | tee -a /etc/yum.repos.d/cloudstack.repo
-            echo "enabled=1" | tee -a /etc/yum.repos.d/cloudstack.repo
-            echo "gpgcheck=1" | tee -a /etc/yum.repos.d/cloudstack.repo
-            echo "gpgkey=https://download.cloudstack.org/release.asc" | tee -a /etc/yum.repos.d/cloudstack.repo
-            
-            # Update the system
-            sudo dnf update -y
-            ;;
-        *)
-            echo "Unsupported OS: $OS_TYPE"
-            exit 1
-            ;;
-    esac
+                # Update the system
+                apt-get update
+                ;;
+            rhel|centos|fedora|rocky|alma)
+                # Add CloudStack's signing key
+                curl -fsSL https://download.cloudstack.org/release.asc | tee /etc/pki/rpm-gpg/CloudStack.asc
+                
+                # Add CloudStack repository
+                echo "[cloudstack]" | tee /etc/yum.repos.d/cloudstack.repo
+                echo "name=CloudStack Repo" | tee -a /etc/yum.repos.d/cloudstack.repo
+                echo "baseurl=https://download.cloudstack.org/centos/$OS_VERSION" | tee -a /etc/yum.repos.d/cloudstack.repo
+                echo "enabled=1" | tee -a /etc/yum.repos.d/cloudstack.repo
+                echo "gpgcheck=1" | tee -a /etc/yum.repos.d/cloudstack.repo
+                echo "gpgkey=https://download.cloudstack.org/release.asc" | tee -a /etc/yum.repos.d/cloudstack.repo
+                
+                # Update the system
+                sudo dnf update -y
+                ;;
+            *)
+                echo "Unsupported OS: $OS_TYPE"
+                exit 1
+                ;;
+        esac
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Repository Configuration" \
+               --gauge "Configuring Cloudstack repository..." 10 70
 }
 
 install_base_dependencies() {
+    case "$PACKAGE_MANAGER" in
+        apt)
+            apt-get install -y dialog &>/dev/null || \
+                error_exit "Failed to install base dependencies"
+            ;;
+        dnf)
+            dnf install -y dialog  &>/dev/null || \
+                error_exit "Failed to install base dependencies"
+            ;;
+    esac
     {
         echo "10"
         echo "# Updating package lists..."
@@ -166,11 +193,11 @@ install_base_dependencies() {
         echo "Installing base dependencies (dialog, python, whiptail, curl, etc.)..."
         case "$PACKAGE_MANAGER" in
             apt)
-                apt-get install -y dialog python3 whiptail curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
+                apt-get install -y curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
                     error_exit "Failed to install base dependencies"
                 ;;
             dnf)
-                dnf install -y dialog python3 whiptail curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
+                dnf install -y curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
                     error_exit "Failed to install base dependencies"
                 ;;
         esac 
@@ -197,8 +224,8 @@ update_system() {
 
 # Function to install packages based on the detected OS
 install_package() {
+    local package_name=$1
     {
-        local package_name=$1
         echo "Installing $package_name..."
         case "$PACKAGE_MANAGER" in
             apt)
@@ -320,6 +347,47 @@ install_components() {
     sleep 2
 }
 
+configure_components() {
+    local total_steps=${#SELECTED_COMPONENTS[@]}
+    local current_step=0
+    
+    for component in "${SELECTED_COMPONENTS[@]}"; do
+        current_step=$((current_step + 1))
+        local progress=$((current_step * 100 / total_steps))
+        
+        # Show progress
+        echo "$progress" | dialog --backtitle "$SCRIPT_NAME" \
+                                 --title "Installing Components" \
+                                 --gauge "Installing $component..." 10 70
+        
+        case "$component" in
+            management)
+                configure_management_server
+                ;;
+            usage)
+                configure_usage_server
+                ;;
+            kvm)
+                configure_kvm_agent
+                ;;
+            mysql)
+                configure_mysql_server
+                ;;
+            nfs)
+                configure_nfs_server
+                ;;
+        esac
+        
+        sleep 1  # Brief pause for user experience
+    done
+    
+    # Final progress update
+    echo "100" | dialog --backtitle "$SCRIPT_NAME" \
+                       --title "Installation Complete" \
+                       --gauge "All components installed successfully!" 10 70
+    
+    sleep 2
+}
 
 # Main function
 main() {
@@ -329,6 +397,9 @@ main() {
     
     # Check prerequisites
     check_root
+
+    detect_os
+    install_base_dependencies
     
     # Welcome message
     dialog --backtitle "$SCRIPT_NAME" \
@@ -336,11 +407,12 @@ main() {
            --msgbox "Welcome to the Apache CloudStack Installation Script\!\n\nThis script will help you install and configure CloudStack components on your system.\n\nPress OK to continue." 12 60
     
     # Main installation flow
-    detect_os
-    install_base_dependencies
     configure_cloudstack_repo
     select_components
     install_components
+
+    # Configure components
+
     
     # Optional zone deployment
     if select_zone_deployment; then
@@ -351,6 +423,7 @@ main() {
     show_final_summary
     
     log "CloudStack installation script completed successfully"
+    exit 0
 }
 
 # Cleanup function for trap
