@@ -268,7 +268,14 @@ install_mysql_server() {
 
 # Function to install NFS Server
 install_nfs_server() {
-    install_package "nfs-kernel-server"
+    case "$PACKAGE_MANAGER" in
+        apt)
+            apt-get install -y nfs-kernel-server nfs-common quota
+            ;;
+        dnf)
+            yum install -y nfs-utils quota
+            ;;
+    esac
 }
 
 select_components() {
@@ -347,6 +354,112 @@ install_components() {
     sleep 2
 }
 
+configure_mysql() {
+  MYSQL_VERSION=$(mysql -V 2>/dev/null || echo "MySQL not found")
+  dialog --title "MySQL Configuration" --msgbox "Detected MySQL Version:\n$MYSQL_VERSION" 8 50
+
+  if [[ -f "/etc/mysql/mysql.conf.d/cloudstack.cnf" ]]; then
+    dialog --title "MySQL Configuration" --msgbox "Configuration already exists.\nSkipping MySQL setup." 6 50
+    return
+  fi
+
+  dialog --yesno "Do you want to configure MySQL for CloudStack?" 7 50
+  response=$?
+  if [[ $response -ne 0 ]]; then
+    dialog --msgbox "MySQL configuration skipped." 5 40
+    return
+  fi
+
+  sqlmode="$(mysql -B -e "show global variables like 'sql_mode'" 2>/dev/null | grep sql_mode | awk '{ print $2; }' | sed -e 's/ONLY_FULL_GROUP_BY,//')"
+
+  if [[ -z "$sqlmode" ]]; then
+    dialog --msgbox "Failed to fetch current SQL mode. Aborting." 6 50
+    return 1
+  fi
+
+  cat > /etc/mysql/mysql.conf.d/cloudstack.cnf <<EOF
+[mysqld]
+server_id = 1
+sql_mode = "$sqlmode"
+innodb_rollback_on_timeout = 1
+innodb_lock_wait_timeout = 600
+max_connections = 1000
+log_bin = mysql-bin
+binlog_format = "ROW"
+EOF
+
+  systemctl restart mysql && \
+    dialog --msgbox "MySQL has been configured and restarted successfully." 6 50 || \
+    dialog --msgbox "Failed to restart MySQL. Please check the service manually." 6 60
+}
+
+
+configure_nfs_server() {
+  source /etc/os-release
+  DISTRO=$ID
+
+  dialog --title "NFS Configuration" --msgbox "Starting NFS storage configuration..." 6 50
+
+  if grep -q "^/export " /etc/exports; then
+    dialog --title "NFS Configuration" --msgbox "NFS is already configured. Skipping setup." 6 50
+    return
+  fi
+
+  dialog --title "NFS Setup" --yesno "Do you want to configure the system as an NFS server with:\n\n• Export path: /export\n• Subdirs: /primary & /secondary\n• Permissions: rw, no_root_squash\n\nProceed?" 12 60
+  [[ $? -ne 0 ]] && dialog --msgbox "NFS configuration skipped." 5 40 && return
+
+  # Step 1: Create exports and directories
+  echo "/export  *(rw,async,no_root_squash,no_subtree_check)" >> /etc/exports
+  mkdir -p /export/primary /export/secondary
+  exportfs -a
+
+  # Step 2: Configure ports and services based on distro
+  if [[ "$DISTRO" =~ ^(ubuntu|debian)$ ]]; then
+    sed -i -e 's/^RPCMOUNTDOPTS="--manage-gids"$/RPCMOUNTDOPTS="-p 892 --manage-gids"/g' /etc/default/nfs-kernel-server
+    sed -i -e 's/^STATDOPTS=$/STATDOPTS="--port 662 --outgoing-port 2020"/g' /etc/default/nfs-common
+    grep -q 'NEED_STATD=yes' /etc/default/nfs-common || echo "NEED_STATD=yes" >> /etc/default/nfs-common
+    sed -i -e 's/^RPCRQUOTADOPTS=$/RPCRQUOTADOPTS="-p 875"/g' /etc/default/quota
+
+    systemctl restart nfs-kernel-server
+    SERVICE_STATUS=$?
+  
+  elif [[ "$DISTRO" =~ ^(rhel|centos|fedora|ol|oracle)$ ]]; then
+    # Set ports in /etc/sysconfig/nfs if needed
+    cat <<EOF >> /etc/sysconfig/nfs
+MOUNTD_PORT=892
+STATD_PORT=662
+STATD_OUTGOING_PORT=2020
+LOCKD_TCPPORT=32803
+LOCKD_UDPPORT=32769
+RQUOTAD_PORT=875
+EOF
+
+    systemctl enable --now rpcbind nfs-server
+    systemctl restart nfs-server
+    SERVICE_STATUS=$?
+
+    # Open firewall ports if firewalld is running
+    if systemctl is-active --quiet firewalld; then
+      firewall-cmd --permanent --add-service=nfs
+      firewall-cmd --permanent --add-service=mountd
+      firewall-cmd --permanent --add-service=rpc-bind
+      firewall-cmd --reload
+    fi
+  else
+    dialog --title "Error" --msgbox "Unsupported distribution: $DISTRO" 6 50
+    return 1
+  fi
+
+  # Step 3: Final result
+  if [[ $SERVICE_STATUS -eq 0 ]]; then
+    exports_list=$(exportfs)
+    dialog --title "NFS Configuration Complete" --msgbox "NFS Server configured and restarted successfully.\n\nCurrent exports:\n$exports_list" 15 70
+  else
+    dialog --title "Error" --msgbox "Failed to restart NFS server. Please check the service logs." 6 60
+  fi
+}
+
+
 configure_components() {
     local total_steps=${#SELECTED_COMPONENTS[@]}
     local current_step=0
@@ -371,7 +484,7 @@ configure_components() {
                 configure_kvm_agent
                 ;;
             mysql)
-                configure_mysql_server
+                configure_mysql
                 ;;
             nfs)
                 configure_nfs_server
@@ -383,10 +496,104 @@ configure_components() {
     
     # Final progress update
     echo "100" | dialog --backtitle "$SCRIPT_NAME" \
-                       --title "Installation Complete" \
-                       --gauge "All components installed successfully!" 10 70
+                       --title "Configuration Complete" \
+                       --gauge "All components configured successfully!" 10 70
     
     sleep 2
+}
+
+configure_cloud_init() {
+  [[ -d /etc/cloud/cloud.cfg.d ]] || return
+  if ! grep -q 'config: disabled' /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null; then
+    echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    info "Disabled cloud-init network config"
+  fi
+}
+
+configure_network() {
+    if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
+        info "Detected Debian/Ubuntu – applying Netplan config"
+
+        if [[ -d "/sys/class/net/$BRIDGE/bridge" ]]; then
+            info "Bridge $BRIDGE already exists, skipping creation..."
+            exit 0
+        fi
+
+        cfgfile="/etc/netplan/01-bridge-$BRIDGE.yaml"
+        cat > "$cfgfile" <<EOF   
+        network:
+        version: 2
+        renderer: networkd
+        ethernets:
+            $interface:
+            dhcp4: false
+            dhcp6: false
+            optional: true
+        bridges:
+            $BRIDGE:
+            interfaces: [$interface]
+            addresses: [$hostipandsub]
+            routes:
+                - to: default
+                via: $gateway
+            nameservers:
+                addresses: [$DNS]
+            dhcp4: false
+            dhcp6: false
+            parameters:
+                stp: false
+                forward-delay: 0
+        EOF
+        chmod 600 "$cfgfile"
+        configure_cloud_init
+        rm -f /etc/netplan/50-cloud-init.yaml
+        netplan generate
+        netplan apply
+        info "Bridge '$BRIDGE' configured via Netplan"
+
+    elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle)$ ]]; then
+        info "Detected RHEL/CentOS/Oracle – using NetworkManager"
+
+        configure_cloud_init
+
+        # Create bridge if missing
+        if ! nmcli connection show "$BRIDGE" &>/dev/null; then
+            nmcli connection add type bridge autoconnect yes con-name "$BRIDGE" ifname "$BRIDGE"
+            info "Created bridge connection '$BRIDGE'"
+        else
+            info "Bridge connection '$BRIDGE' already exists"
+        fi
+
+        # Attach interface
+        slave_name="${interface}-slave-$BRIDGE"
+        if ! nmcli connection show "$slave_name" &>/dev/null; then
+            nmcli connection add type ethernet slave-type bridge con-name "$slave_name" ifname "$interface" master "$BRIDGE"
+            info "Created slave connection '$slave_name'"
+        else
+            info "Slave connection '$slave_name' already exists"
+        fi
+
+        # Set static config
+        nmcli connection modify "$BRIDGE" \
+            ipv4.method manual \
+            ipv4.addresses "$hostipandsub" \
+            ipv4.gateway "$gateway" \
+            ipv4.dns "$DNS" \
+            ipv6.method ignore \
+            connection.autoconnect yes
+
+        nmcli connection up "$slave_name" || true
+        nmcli connection up "$BRIDGE" || true
+        info "Bridge '$BRIDGE' up with interface '$interface' attached"
+    else
+      error "Unsupported distro: $OS_TYPE"
+    fi
+}
+
+configure_prerequisites() {
+    configure_network
+    configure_cloudstack_repo
+    update_system
 }
 
 # Main function
@@ -400,6 +607,7 @@ main() {
 
     detect_os
     install_base_dependencies
+    configure_prerequisites
     
     # Welcome message
     dialog --backtitle "$SCRIPT_NAME" \
@@ -407,12 +615,11 @@ main() {
            --msgbox "Welcome to the Apache CloudStack Installation Script\!\n\nThis script will help you install and configure CloudStack components on your system.\n\nPress OK to continue." 12 60
     
     # Main installation flow
-    configure_cloudstack_repo
     select_components
     install_components
 
     # Configure components
-
+    configure_components
     
     # Optional zone deployment
     if select_zone_deployment; then
