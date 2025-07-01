@@ -127,43 +127,85 @@ detect_os() {
 }
 
 configure_cloudstack_repo() {
-    {
-        echo "Configuring CloudStack repository..."
-
-        case "$OS_TYPE" in
-            ubuntu|debian)
-                # Add CloudStack's signing key
-                curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | tee /etc/apt/keyrings/cloudstack.gpg > /dev/null
+    case "$OS_TYPE" in
+        ubuntu|debian)
+            {
+                echo "Configuring CloudStack repository..."
+                echo "Adding CloudStack's signing key..."
+                if curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | tee /etc/apt/keyrings/cloudstack.gpg > /dev/null; then
+                    echo "CloudStack signing key added successfully."
+                else
+                    echo "ERROR: Failed to add CloudStack signing key."
+                    exit 1
+                fi
                 
-                # Add CloudStack repository
-                echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu noble $CS_VERSION" | tee /etc/apt/sources.list.d/cloudstack.list
-
-                # Update the system
-                apt-get update
-                ;;
-            rhel|centos|fedora|rocky|alma)
-                # Add CloudStack's signing key
-                curl -fsSL https://download.cloudstack.org/release.asc | tee /etc/pki/rpm-gpg/CloudStack.asc
+                echo "Adding CloudStack repository..."
+                if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu noble $CS_VERSION" | tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
+                    echo "CloudStack repository added successfully."
+                else
+                    echo "ERROR: Failed to add CloudStack repository."
+                    exit 1
+                fi
                 
-                # Add CloudStack repository
-                echo "[cloudstack]" | tee /etc/yum.repos.d/cloudstack.repo
-                echo "name=CloudStack Repo" | tee -a /etc/yum.repos.d/cloudstack.repo
-                echo "baseurl=https://download.cloudstack.org/centos/$OS_VERSION" | tee -a /etc/yum.repos.d/cloudstack.repo
-                echo "enabled=1" | tee -a /etc/yum.repos.d/cloudstack.repo
-                echo "gpgcheck=1" | tee -a /etc/yum.repos.d/cloudstack.repo
-                echo "gpgkey=https://download.cloudstack.org/release.asc" | tee -a /etc/yum.repos.d/cloudstack.repo
+                echo "Updating package list..."
+                if apt-get update > /dev/null 2>&1; then
+                    echo "Package list updated successfully."
+                else
+                    echo "ERROR: Failed to update package list."
+                    exit 1
+                fi
+                echo "Repository configuration completed."
+            } | dialog --backtitle "$SCRIPT_NAME" \
+                       --title "Repository Configuration" \
+                       --progressbox "Configuring CloudStack repository..." 15 70
+            ;;
+            
+        rhel|centos|fedora|rocky|alma)
+            {
+                echo "Configuring CloudStack repository..."
+                echo "Adding CloudStack's signing key..."
+                if curl -fsSL https://download.cloudstack.org/release.asc | tee /etc/pki/rpm-gpg/CloudStack.asc > /dev/null; then
+                    echo "CloudStack signing key added successfully."
+                else
+                    echo "ERROR: Failed to add CloudStack signing key."
+                    exit 1
+                fi
                 
-                # Update the system
-                sudo dnf update -y
-                ;;
-            *)
-                echo "Unsupported OS: $OS_TYPE"
-                exit 1
-                ;;
-        esac
-    } | dialog --backtitle "$SCRIPT_NAME" \
-               --title "Repository Configuration" \
-               --gauge "Configuring Cloudstack repository..." 10 70
+                echo "Adding CloudStack repository..."
+                {
+                    echo "[cloudstack]"
+                    echo "name=CloudStack Repo"
+                    echo "baseurl=https://download.cloudstack.org/centos/$OS_VERSION"
+                    echo "enabled=1"
+                    echo "gpgcheck=1"
+                    echo "gpgkey=https://download.cloudstack.org/release.asc"
+                } | tee /etc/yum.repos.d/cloudstack.repo > /dev/null
+                
+                if [ $? -eq 0 ]; then
+                    echo "CloudStack repository added successfully."
+                else
+                    echo "ERROR: Failed to add CloudStack repository."
+                    exit 1
+                fi
+                
+                echo "Updating system packages..."
+                if dnf update -y > /dev/null 2>&1; then
+                    echo "System packages updated successfully."
+                else
+                    echo "ERROR: Failed to update system packages."
+                    exit 1
+                fi
+                echo "Repository configuration completed."
+            } | dialog --backtitle "$SCRIPT_NAME" \
+                       --title "Repository Configuration" \
+                       --progressbox "Configuring CloudStack repository..." 15 70
+            ;;
+            
+        *)
+            dialog --msgbox "Unsupported OS: $OS_TYPE" 6 50
+            exit 1
+            ;;
+    esac
 }
 
 install_base_dependencies() {
@@ -459,6 +501,27 @@ EOF
   fi
 }
 
+configure_management_server() {
+
+}
+
+
+configure_usage_server() {
+
+}
+
+configure_kvm_agent() {
+
+}
+
+show_final_summary() {
+
+}
+
+deploy_zone() {
+    
+}
+
 
 configure_components() {
     local total_steps=${#SELECTED_COMPONENTS[@]}
@@ -506,71 +569,78 @@ configure_cloud_init() {
   [[ -d /etc/cloud/cloud.cfg.d ]] || return
   if ! grep -q 'config: disabled' /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null; then
     echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-    info "Disabled cloud-init network config"
+    info_msg "Disabled cloud-init network config"
   fi
 }
 
 configure_network() {
     if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
-        info "Detected Debian/Ubuntu – applying Netplan config"
+        info_msg "Detected Debian/Ubuntu – applying Netplan config"
 
         if [[ -d "/sys/class/net/$BRIDGE/bridge" ]]; then
-            info "Bridge $BRIDGE already exists, skipping creation..."
-            exit 0
+            info_msg "Bridge $BRIDGE already exists, skipping creation..."
+            return
         fi
+
+        # Gather interface, IP, gateway
+        interface=$(ip -o link show | awk -F': ' '/state UP/ && $2!~/^lo/ {print $2; exit}')
+        [[ -n "$interface" ]] || error "No active non-loopback interface found."
+
+        hostipandsub=$(ip -4 addr show dev "$interface" | awk '/inet / {print $2; exit}')
+        gateway=$(ip route show default | awk '/default/ {print $3; exit}')
 
         cfgfile="/etc/netplan/01-bridge-$BRIDGE.yaml"
         cat > "$cfgfile" <<EOF   
         network:
-        version: 2
-        renderer: networkd
-        ethernets:
+          version: 2
+          renderer: networkd
+          ethernets:
             $interface:
-            dhcp4: false
-            dhcp6: false
-            optional: true
-        bridges:
+              dhcp4: false
+              dhcp6: false
+              optional: true
+          bridges:
             $BRIDGE:
-            interfaces: [$interface]
-            addresses: [$hostipandsub]
-            routes:
+              interfaces: [$interface]
+              addresses: [$hostipandsub]
+              routes:
                 - to: default
-                via: $gateway
-            nameservers:
+                  via: $gateway
+              nameservers:
                 addresses: [$DNS]
-            dhcp4: false
-            dhcp6: false
-            parameters:
+              dhcp4: false
+              dhcp6: false
+              parameters:
                 stp: false
                 forward-delay: 0
-        EOF
+EOF
         chmod 600 "$cfgfile"
         configure_cloud_init
         rm -f /etc/netplan/50-cloud-init.yaml
         netplan generate
         netplan apply
-        info "Bridge '$BRIDGE' configured via Netplan"
+        info_msg "Bridge '$BRIDGE' configured via Netplan"
 
     elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle)$ ]]; then
-        info "Detected RHEL/CentOS/Oracle – using NetworkManager"
+        info_msg "Detected RHEL/CentOS/Oracle – using NetworkManager"
 
         configure_cloud_init
 
         # Create bridge if missing
         if ! nmcli connection show "$BRIDGE" &>/dev/null; then
             nmcli connection add type bridge autoconnect yes con-name "$BRIDGE" ifname "$BRIDGE"
-            info "Created bridge connection '$BRIDGE'"
+            info_msg "Created bridge connection '$BRIDGE'"
         else
-            info "Bridge connection '$BRIDGE' already exists"
+            info_msg "Bridge connection '$BRIDGE' already exists"
         fi
 
         # Attach interface
         slave_name="${interface}-slave-$BRIDGE"
         if ! nmcli connection show "$slave_name" &>/dev/null; then
             nmcli connection add type ethernet slave-type bridge con-name "$slave_name" ifname "$interface" master "$BRIDGE"
-            info "Created slave connection '$slave_name'"
+            info_msg "Created slave connection '$slave_name'"
         else
-            info "Slave connection '$slave_name' already exists"
+            info_msg "Slave connection '$slave_name' already exists"
         fi
 
         # Set static config
@@ -584,7 +654,7 @@ configure_network() {
 
         nmcli connection up "$slave_name" || true
         nmcli connection up "$BRIDGE" || true
-        info "Bridge '$BRIDGE' up with interface '$interface' attached"
+        info_msg "Bridge '$BRIDGE' up with interface '$interface' attached"
     else
       error "Unsupported distro: $OS_TYPE"
     fi
