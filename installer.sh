@@ -291,6 +291,7 @@ install_common_packages() {
 # Function to install CloudStack Management Server
 install_management_server() {
     install_package "cloudstack-management"
+    systemctl stop cloudstack-management
 }
 
 # Function to install CloudStack Usage Server
@@ -502,24 +503,55 @@ EOF
 }
 
 configure_management_server() {
+    if systemctl is-active cloudstack-management > /dev/null; then
+        dialog --title "Info" --msgbox "CloudStack Management Server is already running.\nSkipping DB deployment." 7 60
+        return
+    fi
 
+    # Prompt for bridge interface
+    BRIDGE=$(dialog --inputbox "Enter the bridge interface name (e.g., cloudbr0):" 8 50 "cloudbr0" 3>&1 1>&2 2>&3)
+
+    # Get the bridge IP
+    cloudbr0_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
+
+    if [[ -z "$cloudbr0_ip" ]]; then
+        dialog --title "Error" --msgbox "Could not determine IP address of interface '$BRIDGE'.\nAborting." 8 60
+        return 1
+    fi
+
+    dialog --title "Info" --msgbox "Using IP address: $cloudbr0_ip for CloudStack DB setup." 7 60
+
+    # Deploy CloudStack database
+    dialog --infobox "Deploying CloudStack Database..." 5 50
+    cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i "$cloudbr0_ip"
+
+    # Deploy management server
+    dialog --infobox "Deploying CloudStack Management Server..." 5 50
+    cloudstack-setup-management
+
+    dialog --title "Success" --msgbox "CloudStack Management Server has been configured." 7 60
 }
+
 
 
 configure_usage_server() {
-
+    echo "config usage server"
 }
 
 configure_kvm_agent() {
-
+    echo "config kvm agent="
 }
 
 show_final_summary() {
-
+    echo "Summary mgmt server"
 }
 
 deploy_zone() {
-    
+    echo "Deploying zone"
+}
+
+select_zone_deployment() {
+    echo "select zone"
 }
 
 
