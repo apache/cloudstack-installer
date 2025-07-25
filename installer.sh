@@ -539,7 +539,143 @@ configure_usage_server() {
 }
 
 configure_kvm_agent() {
-    echo "config kvm agent="
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "KVM Host Configuration" \
+           --infobox "Starting KVM host configuration..." 5 50
+    sleep 2
+
+    # Configure VNC
+    {
+        echo "10"
+        echo "# Configuring VNC access..."
+        if sed -i -e 's/\#vnc_listen.*$/vnc_listen = "0.0.0.0"/g' /etc/libvirt/qemu.conf; then
+            echo "VNC configuration successful"
+        else
+            echo "Failed to configure VNC"
+            exit 1
+        fi
+
+        echo "25"
+        echo "# Configuring libvirtd..."
+        # Configure libvirtd to listen
+        if ! grep '^LIBVIRTD_ARGS="--listen"' /etc/default/libvirtd > /dev/null; then
+            echo 'LIBVIRTD_ARGS="--listen"' >> /etc/default/libvirtd
+        fi
+
+        echo "40"
+        echo "# Setting up libvirt TCP access..."
+        cat >> /etc/libvirt/libvirtd.conf <<EOF
+listen_tcp = 1
+listen_tls = 0
+tcp_port = "16509"
+mdns_adv = 0
+auth_tcp = "none"
+EOF
+
+        echo "60"
+        echo "# Configuring libvirt sockets..."
+        systemctl mask libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tls.socket libvirtd-tcp.socket
+        systemctl restart libvirtd
+
+        echo "75"
+        echo "# Configuring security policies..."
+        case "$OS_TYPE" in
+            ubuntu|debian)
+                echo "# Configuring AppArmor..."
+                if command -v apparmor_parser >/dev/null; then
+                    # Check if profiles exist before trying to disable them
+                    local profiles=(
+                        "/etc/apparmor.d/usr.sbin.libvirtd"
+                        "/etc/apparmor.d/usr.lib.libvirt.virt-aa-helper"
+                    )
+                    
+                    for profile in "${profiles[@]}"; do
+                        if [[ -f "$profile" ]]; then
+                            if [[ ! -L "/etc/apparmor.d/disable/$(basename "$profile")" ]]; then
+                                ln -sf "$profile" "/etc/apparmor.d/disable/"
+                                if [[ -f "$profile" ]]; then
+                                    apparmor_parser -R "$profile" || warn_msg "Failed to remove profile: $profile"
+                                fi
+                            else
+                                echo "Profile $(basename "$profile") already disabled"
+                            fi
+                        else
+                            echo "Profile $profile not found, skipping"
+                        fi
+                    done
+                    
+                    # Restart AppArmor service to apply changes
+                    if systemctl is-active --quiet apparmor; then
+                        systemctl restart apparmor || warn_msg "Failed to restart AppArmor"
+                    fi
+                else
+                    echo "AppArmor not installed, skipping configuration"
+                fi
+                ;;
+            rhel|centos|rocky|oracle)
+                # SELinux configuration if needed
+                setsebool -P virt_use_nfs 1
+                ;;
+        esac
+
+        echo "85"
+        echo "# Configuring firewall..."
+        ports=(
+            "22/tcp"           # SSH
+            "1798/tcp"         # CloudStack Management Server
+            "16509/tcp"        # Libvirt
+            "16514/tcp"        # Libvirt
+            "5900:6100/tcp"    # VNC
+            "49152:49216/tcp"  # Live Migration
+        )
+        case "$OS_TYPE" in
+            ubuntu|debian)
+                if command -v ufw >/dev/null; then
+                    for port in "${ports[@]}"; do
+                        ufw allow proto tcp from any to any port "$port"
+                    done
+                        ufw reload
+                else
+                    warn_msg "UFW not found, skipping firewall configuration"
+                fi
+                ;;
+            rhel|centos|rocky|oracle)
+                if command -v firewall-cmd >/dev/null; then
+                    for port in "${ports[@]}"; do
+                        firewall-cmd --permanent --add-port="$port"
+                    done
+                    firewall-cmd --reload
+                fi
+                ;;
+        esac
+
+        echo "100"
+        echo "# KVM host configuration completed!"
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "KVM Host Configuration" \
+               --gauge "Configuring KVM host..." 10 70 0
+
+    # Show configuration summary
+    local summary="KVM Host Configuration Summary:\n\n"
+    summary+="✓ VNC configured for remote access\n"
+    summary+="✓ Libvirt TCP access enabled\n"
+    summary+="✓ Security policies configured\n"
+    summary+="✓ Firewall rules added for ports:\n"
+    summary+="  - SSH (22)\n"
+    summary+="  - Libvirt (16509)\n"
+    summary+="  - VNC (5900-6100)\n"
+    summary+="  - Live Migration (49152-49216)\n"
+
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Configuration Complete" \
+           --msgbox "$summary" 15 60
+
+    # Verify configuration
+    if ! systemctl is-active --quiet libvirtd; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Warning" \
+               --msgbox "Libvirt service is not running! Please check system logs." 6 60
+    fi
 }
 
 show_final_summary() {
@@ -551,7 +687,11 @@ deploy_zone() {
 }
 
 select_zone_deployment() {
-    echo "select zone"
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Zone Deployment" \
+           --yesno "Would you like to deploy a new CloudStack Zone?\n\nThis will:\n\n1. Create a new Zone\n2. Configure Network offerings\n3. Add the first Pod\n4. Add the first Cluster\n5. Add the first Host\n\nDeploy Zone now?" 15 60
+
+    return $?
 }
 
 
@@ -559,42 +699,98 @@ configure_components() {
     local total_steps=${#SELECTED_COMPONENTS[@]}
     local current_step=0
     
-    for component in "${SELECTED_COMPONENTS[@]}"; do
-        current_step=$((current_step + 1))
-        local progress=$((current_step * 100 / total_steps))
-        
-        # Show progress
-        echo "$progress" | dialog --backtitle "$SCRIPT_NAME" \
-                                 --title "Installing Components" \
-                                 --gauge "Installing $component..." 10 70
-        
-        case "$component" in
-            management)
-                configure_management_server
-                ;;
-            usage)
-                configure_usage_server
-                ;;
-            kvm)
-                configure_kvm_agent
-                ;;
-            mysql)
-                configure_mysql
-                ;;
-            nfs)
-                configure_nfs_server
-                ;;
-        esac
-        
-        sleep 1  # Brief pause for user experience
-    done
-    
-    # Final progress update
-    echo "100" | dialog --backtitle "$SCRIPT_NAME" \
-                       --title "Configuration Complete" \
-                       --gauge "All components configured successfully!" 10 70
-    
+    # Function to check if component is selected
+    is_component_selected() {
+        local component=$1
+        [[ " ${SELECTED_COMPONENTS[@]} " =~ " $component " ]]
+    }
+
+    # First configure core dependencies if selected
+    {
+        # 1. Configure MySQL (if selected)
+        if is_component_selected "mysql"; then
+            current_step=$((current_step + 1))
+            echo "$((current_step * 100 / total_steps))"
+            echo "# Configuring MySQL Server..."
+            configure_mysql
+        fi
+
+        # 2. Configure NFS (if selected)
+        if is_component_selected "nfs"; then
+            current_step=$((current_step + 1))
+            echo "$((current_step * 100 / total_steps))"
+            echo "# Configuring NFS Server..."
+            configure_nfs_server
+        fi
+
+        # 3. Configure Management Server (if selected)
+        if is_component_selected "management"; then
+            # Check if dependencies are configured
+            if is_component_selected "mysql" && ! systemctl is-active --quiet mysql; then
+                dialog --backtitle "$SCRIPT_NAME" \
+                       --title "Error" \
+                       --msgbox "MySQL must be running before configuring Management Server" 6 60
+                return 1
+            fi
+            
+            current_step=$((current_step + 1))
+            echo "$((current_step * 100 / total_steps))"
+            echo "# Configuring Management Server..."
+            configure_management_server
+        fi
+
+        # 4. Configure KVM Agent (if selected)
+        if is_component_selected "kvm"; then
+            # Check if management server is configured when both are selected
+            if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
+                dialog --backtitle "$SCRIPT_NAME" \
+                       --title "Error" \
+                       --msgbox "Management Server must be running before configuring KVM Agent" 6 60
+                return 1
+            fi
+            
+            current_step=$((current_step + 1))
+            echo "$((current_step * 100 / total_steps))"
+            echo "# Configuring KVM Agent..."
+            configure_kvm_agent
+        fi
+
+        # 5. Configure Usage Server (if selected)
+        if is_component_selected "usage"; then
+            # Check if management server is configured
+            if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
+                dialog --backtitle "$SCRIPT_NAME" \
+                       --title "Error" \
+                       --msgbox "Management Server must be running before configuring Usage Server" 6 60
+                return 1
+            fi
+            
+            current_step=$((current_step + 1))
+            echo "$((current_step * 100 / total_steps))"
+            echo "# Configuring Usage Server..."
+            configure_usage_server
+        fi
+
+        # Final progress update
+        echo "100"
+        echo "# Configuration complete!"
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Configuring Components" \
+               --gauge "Setting up CloudStack components..." 10 70 0
+
+    # Give user time to read the final message
     sleep 2
+
+    # Show configuration summary
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Configuration Summary" \
+           --msgbox "Configured components in order:\n\n$(
+                [[ " ${SELECTED_COMPONENTS[@]} " =~ " mysql " ]] && echo "✓ MySQL Server\n"
+                [[ " ${SELECTED_COMPONENTS[@]} " =~ " nfs " ]] && echo "✓ NFS Server\n"
+                [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]] && echo "✓ Management Server\n"
+                [[ " ${SELECTED_COMPONENTS[@]} " =~ " kvm " ]] && echo "✓ KVM Agent\n"
+                [[ " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]] && echo "✓ Usage Server\n"
+           )" 15 60
 }
 
 configure_cloud_init() {
@@ -692,6 +888,137 @@ EOF
     fi
 }
 
+show_validation_summary() {
+    local summary=""
+    local status_ok=true
+    local validation_steps=0
+    local current_step=0
+
+    {
+        # 1. Network Validation
+        echo "10"
+        echo "# Checking Network Configuration..."
+        if ip link show "$BRIDGE" &>/dev/null; then
+            local bridge_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
+            if [[ -n "$bridge_ip" ]]; then
+                summary+="✓ Network: Bridge $BRIDGE configured with IP $bridge_ip\n"
+            else
+                summary+="✗ Network: Bridge $BRIDGE has no IP address\n"
+                status_ok=false
+            fi
+        else
+            summary+="✗ Network: Bridge $BRIDGE not found\n"
+            status_ok=false
+        fi
+
+        # 2. MySQL Validation (if selected)
+        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " mysql " ]]; then
+            echo "30"
+            echo "# Checking MySQL..."
+            if systemctl is-active --quiet mysql; then
+                if [[ -f "/etc/mysql/mysql.conf.d/cloudstack.cnf" ]]; then
+                    summary+="✓ MySQL: Running and configured\n"
+                else
+                    summary+="✗ MySQL: Running but missing CloudStack configuration\n"
+                    status_ok=false
+                fi
+            else
+                summary+="✗ MySQL: Not running\n"
+                status_ok=false
+            fi
+        fi
+
+        # 3. NFS Validation (if selected)
+        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " nfs " ]]; then
+            echo "50"
+            echo "# Checking NFS Server..."
+            if systemctl is-active --quiet nfs-server; then
+                if grep -q "^/export" /etc/exports; then
+                    summary+="✓ NFS: Server running and exports configured\n"
+                else
+                    summary+="✗ NFS: Server running but exports not configured\n"
+                    status_ok=false
+                fi
+            else
+                summary+="✗ NFS: Server not running\n"
+                status_ok=false
+            fi
+        fi
+
+        # 4. Management Server Validation (if selected)
+        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]]; then
+            echo "70"
+            echo "# Checking Management Server..."
+            if systemctl is-active --quiet cloudstack-management; then
+                if [[ -f "/etc/cloudstack/management/db.properties" ]]; then
+                    summary+="✓ Management Server: Running and configured\n"
+                else
+                    summary+="✗ Management Server: Running but configuration incomplete\n"
+                    status_ok=false
+                fi
+            else
+                summary+="✗ Management Server: Not running\n"
+                status_ok=false
+            fi
+        fi
+
+        # 5. KVM Agent Validation (if selected)
+        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " kvm " ]]; then
+            echo "85"
+            echo "# Checking KVM Agent..."
+            if systemctl is-active --quiet libvirtd; then
+                if grep -q "^listen_tcp = 1" /etc/libvirt/libvirtd.conf; then
+                    summary+="✓ KVM: Libvirt running and configured\n"
+                    if systemctl is-active --quiet cloudstack-agent; then
+                        summary+="✓ KVM: CloudStack agent running\n"
+                    else
+                        summary+="✗ KVM: CloudStack agent not running\n"
+                        status_ok=false
+                    fi
+                else
+                    summary+="✗ KVM: Libvirt TCP not configured\n"
+                    status_ok=false
+                fi
+            else
+                summary+="✗ KVM: Libvirt not running\n"
+                status_ok=false
+            fi
+        fi
+
+        # 6. Usage Server Validation (if selected)
+        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]]; then
+            echo "95"
+            echo "# Checking Usage Server..."
+            if systemctl is-active --quiet cloudstack-usage; then
+                summary+="✓ Usage Server: Running\n"
+            else
+                summary+="✗ Usage Server: Not running\n"
+                status_ok=false
+            fi
+        fi
+
+        echo "100"
+        echo "# Validation complete!"
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Component Validation" \
+               --gauge "Validating installed components..." 10 70 0
+
+    # Show validation results with colors
+    if $status_ok; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Validation Summary" \
+               --colors \
+               --msgbox "\Z2✓ All components are properly configured!\n\n\ZnComponent Status:\n\n$summary" 20 70
+    else
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Validation Summary" \
+               --colors \
+               --msgbox "\Z1⚠ Some components need attention!\n\n\ZnComponent Status:\n\n$summary" 20 70
+    fi
+
+    return $status_ok
+}
+
 configure_prerequisites() {
     configure_network
     configure_cloudstack_repo
@@ -722,10 +1049,21 @@ main() {
 
     # Configure components
     configure_components
+
+    show_validation_summary
+    validation_status=$?
+    if [[ $validation_status -ne 0 ]]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Warning" \
+               --msgbox "Zone deployment is not available until all components are properly configured." 8 60
+    fi
     
-    # Optional zone deployment
     if select_zone_deployment; then
         deploy_zone
+    else
+        dialog --backtitle "$SCRIPT_NAME" \
+                --title "Zone Deployment" \
+                --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
     fi
     
     # Show final summary
