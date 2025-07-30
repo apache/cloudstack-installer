@@ -175,7 +175,7 @@ configure_cloudstack_repo() {
                 {
                     echo "[cloudstack]"
                     echo "name=CloudStack Repo"
-                    echo "baseurl=https://download.cloudstack.org/centos/$OS_VERSION"
+                    echo "baseurl=https://download.cloudstack.org/centos/$OS_VERSION/$CS_VERSION/"
                     echo "enabled=1"
                     echo "gpgcheck=1"
                     echo "gpgkey=https://download.cloudstack.org/release.asc"
@@ -239,7 +239,7 @@ install_base_dependencies() {
                     error_exit "Failed to install base dependencies"
                 ;;
             dnf)
-                dnf install -y curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
+                dnf install -y curl openssh-server sudo wget jq tar nmap &>/dev/null || \
                     error_exit "Failed to install base dependencies"
                 ;;
         esac 
@@ -438,9 +438,6 @@ EOF
 
 
 configure_nfs_server() {
-  source /etc/os-release
-  DISTRO=$ID
-
   dialog --title "NFS Configuration" --msgbox "Starting NFS storage configuration..." 6 50
 
   if grep -q "^/export " /etc/exports; then
@@ -457,7 +454,7 @@ configure_nfs_server() {
   exportfs -a
 
   # Step 2: Configure ports and services based on distro
-  if [[ "$DISTRO" =~ ^(ubuntu|debian)$ ]]; then
+  if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
     sed -i -e 's/^RPCMOUNTDOPTS="--manage-gids"$/RPCMOUNTDOPTS="-p 892 --manage-gids"/g' /etc/default/nfs-kernel-server
     sed -i -e 's/^STATDOPTS=$/STATDOPTS="--port 662 --outgoing-port 2020"/g' /etc/default/nfs-common
     grep -q 'NEED_STATD=yes' /etc/default/nfs-common || echo "NEED_STATD=yes" >> /etc/default/nfs-common
@@ -466,7 +463,7 @@ configure_nfs_server() {
     systemctl restart nfs-kernel-server
     SERVICE_STATUS=$?
   
-  elif [[ "$DISTRO" =~ ^(rhel|centos|fedora|ol|oracle)$ ]]; then
+  elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle|rocky)$ ]]; then
     # Set ports in /etc/sysconfig/nfs if needed
     cat <<EOF >> /etc/sysconfig/nfs
 MOUNTD_PORT=892
@@ -489,7 +486,7 @@ EOF
       firewall-cmd --reload
     fi
   else
-    dialog --title "Error" --msgbox "Unsupported distribution: $DISTRO" 6 50
+    dialog --title "Error" --msgbox "Unsupported distribution: $OS_TYPE" 6 50
     return 1
   fi
 
@@ -794,97 +791,123 @@ configure_components() {
 }
 
 configure_cloud_init() {
-  [[ -d /etc/cloud/cloud.cfg.d ]] || return
-  if ! grep -q 'config: disabled' /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null; then
-    echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-    info_msg "Disabled cloud-init network config"
-  fi
+    # Check if already configured
+    if grep -q 'config: disabled' /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null; then
+        dialog --backtitle "$SCRIPT_NAME" \
+                --title "Cloud-init Configuration" \
+                --msgbox "Cloud-init network configuration already disabled." 6 50
+        return 0
+    fi
+
+    {
+        echo "50"
+        echo "# Disabling cloud-init network configuration..."
+        echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+        
+        echo "100"
+        echo "# Configuration complete!"
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Cloud-init Configuration" \
+               --gauge "Configuring cloud-init..." 8 60 0
+
+    # Confirm success
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Cloud-init Configuration" \
+           --msgbox "Successfully disabled cloud-init network configuration." 6 60
 }
 
 configure_network() {
+    # First check if bridge already exists
+    if ip link show "$BRIDGE" &>/dev/null; then
+        local bridge_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Network Configuration" \
+               --msgbox "Bridge interface $BRIDGE already exists with IP $bridge_ip\nSkipping network configuration." 8 60
+        return 0
+    fi
+
+    # Gather interface, IP, gateway
+    interface=$(ip -o link show | awk -F': ' '/state UP/ && $2!~/^lo/ {print $2; exit}')
+    [[ -n "$interface" ]] || error "No active non-loopback interface found."
+
+    hostipandsub=$(ip -4 addr show dev "$interface" | awk '/inet / {print $2; exit}')
+    gateway=$(ip route show default | awk '/default/ {print $3; exit}')
+
+    # Rest of the existing configure_network code follows...
     if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
-        info_msg "Detected Debian/Ubuntu – applying Netplan config"
-
-        if [[ -d "/sys/class/net/$BRIDGE/bridge" ]]; then
-            info_msg "Bridge $BRIDGE already exists, skipping creation..."
-            return
-        fi
-
-        # Gather interface, IP, gateway
-        interface=$(ip -o link show | awk -F': ' '/state UP/ && $2!~/^lo/ {print $2; exit}')
-        [[ -n "$interface" ]] || error "No active non-loopback interface found."
-
-        hostipandsub=$(ip -4 addr show dev "$interface" | awk '/inet / {print $2; exit}')
-        gateway=$(ip route show default | awk '/default/ {print $3; exit}')
+        dialog --backtitle "$SCRIPT_NAME" \
+               --infobox "Configuring bridge $BRIDGE using Netplan..." 5 50
+        sleep 1
 
         cfgfile="/etc/netplan/01-bridge-$BRIDGE.yaml"
-        cat > "$cfgfile" <<EOF   
-        network:
-          version: 2
-          renderer: networkd
-          ethernets:
-            $interface:
-              dhcp4: false
-              dhcp6: false
-              optional: true
-          bridges:
-            $BRIDGE:
-              interfaces: [$interface]
-              addresses: [$hostipandsub]
-              routes:
-                - to: default
-                  via: $gateway
-              nameservers:
-                addresses: [$DNS]
-              dhcp4: false
-              dhcp6: false
-              parameters:
-                stp: false
-                forward-delay: 0
+        cat > "$cfgfile" <<EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    $interface:
+      dhcp4: false
+      dhcp6: false
+      optional: true
+  bridges:
+    $BRIDGE:
+      interfaces: [$interface]
+      addresses: [$hostipandsub]
+      routes:
+        - to: default
+          via: $gateway
+      nameservers:
+        addresses: [$DNS]
+      parameters:
+        stp: false
+        forward-delay: 0
 EOF
         chmod 600 "$cfgfile"
         configure_cloud_init
         rm -f /etc/netplan/50-cloud-init.yaml
-        netplan generate
-        netplan apply
-        info_msg "Bridge '$BRIDGE' configured via Netplan"
 
-    elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle)$ ]]; then
-        info_msg "Detected RHEL/CentOS/Oracle – using NetworkManager"
+        if netplan generate && netplan apply; then
+            dialog --backtitle "$SCRIPT_NAME" \
+                   --title "Success" \
+                   --msgbox "Bridge $BRIDGE configured successfully with Netplan." 7 60
+        else
+            error_exit "Failed to apply Netplan configuration"
+        fi
+
+    elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle|rocky)$ ]]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --infobox "Configuring bridge $BRIDGE using NetworkManager..." 5 50
+        sleep 1
 
         configure_cloud_init
 
-        # Create bridge if missing
-        if ! nmcli connection show "$BRIDGE" &>/dev/null; then
-            nmcli connection add type bridge autoconnect yes con-name "$BRIDGE" ifname "$BRIDGE"
-            info_msg "Created bridge connection '$BRIDGE'"
-        else
-            info_msg "Bridge connection '$BRIDGE' already exists"
-        fi
-
-        # Attach interface
-        slave_name="${interface}-slave-$BRIDGE"
-        if ! nmcli connection show "$slave_name" &>/dev/null; then
-            nmcli connection add type ethernet slave-type bridge con-name "$slave_name" ifname "$interface" master "$BRIDGE"
-            info_msg "Created slave connection '$slave_name'"
-        else
-            info_msg "Slave connection '$slave_name' already exists"
-        fi
-
-        # Set static config
-        nmcli connection modify "$BRIDGE" \
-            ipv4.method manual \
+        # Create bridge
+        nmcli connection add type bridge \
+            con-name "$BRIDGE" \
+            ifname "$BRIDGE" \
             ipv4.addresses "$hostipandsub" \
             ipv4.gateway "$gateway" \
             ipv4.dns "$DNS" \
-            ipv6.method ignore \
-            connection.autoconnect yes
+            ipv4.method manual \
+            autoconnect yes
 
-        nmcli connection up "$slave_name" || true
-        nmcli connection up "$BRIDGE" || true
-        info_msg "Bridge '$BRIDGE' up with interface '$interface' attached"
+        # Add ethernet interface as a slave to the bridge
+        local slave_name="${interface}-slave-$BRIDGE"
+        nmcli connection add type ethernet \
+            slave-type bridge \
+            con-name "$slave_name" \
+            ifname "$interface" \
+            master "$BRIDGE"
+
+        # Activate connections
+        nmcli connection up "$slave_name" || warn_msg "Failed to bring up slave interface"
+        nmcli connection up "$BRIDGE" || error_exit "Failed to bring up bridge"
+
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Success" \
+               --msgbox "Bridge $BRIDGE configured successfully with NetworkManager." 7 60
     else
-      error "Unsupported distro: $OS_TYPE"
+        error_exit "Unsupported OS type: $OS_TYPE"
     fi
 }
 
