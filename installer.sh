@@ -126,13 +126,34 @@ detect_os() {
     log "OS Detection: $OS_TYPE with package manager: $PACKAGE_MANAGER"
 }
 
+get_ubuntu_codename_for_debian() {
+    case "$1" in
+        buster|bullseye)
+            echo "focal"
+            ;;
+        bookworm|trixie)
+            echo "jammy"
+            ;;
+        *)
+            echo "ERROR: Unsupported Debian codename '$1'" >&2
+            return 1
+            ;;
+    esac
+}
+
 configure_cloudstack_repo() {
     case "$OS_TYPE" in
         ubuntu|debian)
             {
+                if [[ "$OS_TYPE" == "debian" ]]; then
+                    UBUNTU_CODENAME=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
+                else
+                    UBUNTU_CODENAME="$VERSION_CODENAME"
+                fi
                 echo "Configuring CloudStack repository..."
                 echo "Adding CloudStack's signing key..."
-                if curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | tee /etc/apt/keyrings/cloudstack.gpg > /dev/null; then
+
+                if curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/cloudstack.gpg > /dev/null; then
                     echo "CloudStack signing key added successfully."
                 else
                     echo "ERROR: Failed to add CloudStack signing key."
@@ -140,7 +161,7 @@ configure_cloudstack_repo() {
                 fi
                 
                 echo "Adding CloudStack repository..."
-                if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu noble $CS_VERSION" | tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
+                if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu $UBUNTU_CODENAME $CS_VERSION" | sudo tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
                     echo "CloudStack repository added successfully."
                 else
                     echo "ERROR: Failed to add CloudStack repository."
@@ -235,7 +256,7 @@ install_base_dependencies() {
         echo "Installing base dependencies (dialog, python, whiptail, curl, etc.)..."
         case "$PACKAGE_MANAGER" in
             apt)
-                apt-get install -y curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
+                apt-get install -y apt-utils curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
                     error_exit "Failed to install base dependencies"
                 ;;
             dnf)
@@ -331,7 +352,7 @@ select_components() {
            "usage" "CloudStack Usage Server" off \
            "kvm" "KVM Agent" on \
            "mysql" "MySQL Server" on \
-           "nfs" "NFS Server" off \
+           "nfs" "NFS Server" on \
            "common" "CloudStack Common (required)" on \
            2> "$temp_file"
     
@@ -707,16 +728,16 @@ configure_components() {
         # 1. Configure MySQL (if selected)
         if is_component_selected "mysql"; then
             current_step=$((current_step + 1))
-            echo "$((current_step * 100 / total_steps))"
             echo "# Configuring MySQL Server..."
+            echo "$((current_step * 100 / total_steps))"
             configure_mysql
         fi
 
         # 2. Configure NFS (if selected)
         if is_component_selected "nfs"; then
             current_step=$((current_step + 1))
-            echo "$((current_step * 100 / total_steps))"
             echo "# Configuring NFS Server..."
+            echo "$((current_step * 100 / total_steps))"
             configure_nfs_server
         fi
 
@@ -731,8 +752,8 @@ configure_components() {
             fi
             
             current_step=$((current_step + 1))
-            echo "$((current_step * 100 / total_steps))"
             echo "# Configuring Management Server..."
+            echo "$((current_step * 100 / total_steps))"
             configure_management_server
         fi
 
@@ -747,8 +768,8 @@ configure_components() {
             fi
             
             current_step=$((current_step + 1))
-            echo "$((current_step * 100 / total_steps))"
             echo "# Configuring KVM Agent..."
+            echo "$((current_step * 100 / total_steps))"
             configure_kvm_agent
         fi
 
@@ -763,8 +784,8 @@ configure_components() {
             fi
             
             current_step=$((current_step + 1))
-            echo "$((current_step * 100 / total_steps))"
             echo "# Configuring Usage Server..."
+            echo "$((current_step * 100 / total_steps))"
             configure_usage_server
         fi
 
@@ -1056,6 +1077,7 @@ main() {
     
     # Check prerequisites
     check_root
+    check_available_memory
 
     detect_os
     install_base_dependencies
