@@ -169,16 +169,20 @@ configure_cloudstack_repo() {
                 fi
                 
                 echo "Updating package list..."
-                if apt-get update > /dev/null 2>&1; then
+                apt-get update 2>&1 | while IFS= read -r line; do
+                    echo "$line"
+                done
+                if [ ${PIPESTATUS[0]} -eq 0 ]; then
                     echo "Package list updated successfully."
                 else
                     echo "ERROR: Failed to update package list."
                     exit 1
                 fi
+
                 echo "Repository configuration completed."
             } | dialog --backtitle "$SCRIPT_NAME" \
                        --title "Repository Configuration" \
-                       --progressbox "Configuring CloudStack repository..." 15 70
+                       --programbox "Configuring CloudStack repository..." 15 70
             ;;
             
         rhel|centos|fedora|rocky|alma)
@@ -723,80 +727,95 @@ configure_components() {
         [[ " ${SELECTED_COMPONENTS[@]} " =~ " $component " ]]
     }
 
+    # Function to update progress
+    update_progress() {
+        local message=$1
+        local step=$2
+        local percent=$((step * 100 / total_steps))
+        echo "XXX"
+        echo $percent
+        echo "$message"
+        echo "XXX"
+    }
+
     # First configure core dependencies if selected
-    {
-        # 1. Configure MySQL (if selected)
-        if is_component_selected "mysql"; then
-            current_step=$((current_step + 1))
-            echo "# Configuring MySQL Server..."
-            echo "$((current_step * 100 / total_steps))"
-            configure_mysql
-        fi
-
-        # 2. Configure NFS (if selected)
-        if is_component_selected "nfs"; then
-            current_step=$((current_step + 1))
-            echo "# Configuring NFS Server..."
-            echo "$((current_step * 100 / total_steps))"
-            configure_nfs_server
-        fi
-
-        # 3. Configure Management Server (if selected)
-        if is_component_selected "management"; then
-            # Check if dependencies are configured
-            if is_component_selected "mysql" && ! systemctl is-active --quiet mysql; then
-                dialog --backtitle "$SCRIPT_NAME" \
-                       --title "Error" \
-                       --msgbox "MySQL must be running before configuring Management Server" 6 60
-                return 1
-            fi
-            
-            current_step=$((current_step + 1))
-            echo "# Configuring Management Server..."
-            echo "$((current_step * 100 / total_steps))"
-            configure_management_server
-        fi
-
-        # 4. Configure KVM Agent (if selected)
-        if is_component_selected "kvm"; then
-            # Check if management server is configured when both are selected
-            if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
-                dialog --backtitle "$SCRIPT_NAME" \
-                       --title "Error" \
-                       --msgbox "Management Server must be running before configuring KVM Agent" 6 60
-                return 1
-            fi
-            
-            current_step=$((current_step + 1))
-            echo "# Configuring KVM Agent..."
-            echo "$((current_step * 100 / total_steps))"
-            configure_kvm_agent
-        fi
-
-        # 5. Configure Usage Server (if selected)
-        if is_component_selected "usage"; then
-            # Check if management server is configured
-            if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
-                dialog --backtitle "$SCRIPT_NAME" \
-                       --title "Error" \
-                       --msgbox "Management Server must be running before configuring Usage Server" 6 60
-                return 1
-            fi
-            
-            current_step=$((current_step + 1))
-            echo "# Configuring Usage Server..."
-            echo "$((current_step * 100 / total_steps))"
-            configure_usage_server
-        fi
-
-        # Final progress update
-        echo "100"
-        echo "# Configuration complete!"
-    } | dialog --backtitle "$SCRIPT_NAME" \
+    # 1. Configure MySQL (if selected)
+    if is_component_selected "mysql"; then
+        current_step=$((current_step + 1))
+        update_progress "Configuring MySQL Server..." $current_step | \
+        dialog --backtitle "$SCRIPT_NAME" \
                --title "Configuring Components" \
-               --gauge "Setting up CloudStack components..." 10 70 0
+               --gauge "" 10 70 0
+        configure_mysql
+    fi
 
-    # Give user time to read the final message
+    # 2. Configure NFS (if selected)
+    if is_component_selected "nfs"; then
+        current_step=$((current_step + 1))
+        update_progress "Configuring NFS Server..." $current_step | \
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Configuring Components" \
+               --gauge "" 10 70 0
+        configure_nfs_server
+    fi
+
+    # 3. Configure Management Server (if selected)
+    if is_component_selected "management"; then
+        # Check if dependencies are configured
+        if is_component_selected "mysql" && ! systemctl is-active --quiet mysql; then
+            dialog --backtitle "$SCRIPT_NAME" \
+                   --title "Error" \
+                   --msgbox "MySQL must be running before configuring Management Server" 6 60
+            return 1
+        fi
+        
+        current_step=$((current_step + 1))
+        update_progress "Configuring Management Server..." $current_step | \
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Configuring Components" \
+               --gauge "" 10 70 0
+        configure_management_server
+    fi
+
+    # 4. Configure KVM Agent (if selected)
+    if is_component_selected "kvm"; then
+        if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
+            dialog --backtitle "$SCRIPT_NAME" \
+                   --title "Error" \
+                   --msgbox "Management Server must be running before configuring KVM Agent" 6 60
+            return 1
+        fi
+        
+        current_step=$((current_step + 1))
+        update_progress "Configuring KVM Agent..." $current_step | \
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Configuring Components" \
+               --gauge "" 10 70 0
+        configure_kvm_agent
+    fi
+
+    # 5. Configure Usage Server (if selected)
+    if is_component_selected "usage"; then
+        if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
+            dialog --backtitle "$SCRIPT_NAME" \
+                   --title "Error" \
+                   --msgbox "Management Server must be running before configuring Usage Server" 6 60
+            return 1
+        fi
+        
+        current_step=$((current_step + 1))
+        update_progress "Configuring Usage Server..." $current_step | \
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Configuring Components" \
+               --gauge "" 10 70 0
+        configure_usage_server
+    fi
+
+    # Show final progress
+    update_progress "Configuration complete!" $total_steps | \
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Configuring Components" \
+           --gauge "" 10 70 0
     sleep 2
 
     # Show configuration summary
