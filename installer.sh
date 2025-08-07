@@ -37,7 +37,7 @@ INTERFACE=
 BRIDGE=cloudbr0
 HOST_IP=
 GATEWAY=
-DNS="9.9.9.9, 1.1.1.1"
+DNS="8.8.8.8"
 
 # Colors for output
 RED='\033[0;31m'
@@ -542,16 +542,41 @@ configure_management_server() {
     fi
 
     dialog --title "Info" --msgbox "Using IP address: $cloudbr0_ip for CloudStack DB setup." 7 60
+    # Check if MySQL is running
+    if ! systemctl is-active mysql > /dev/null; then
+        dialog --title "Error" --msgbox "MySQL service is not running. Please start MySQL before proceeding." 7 60
+        return 1
+    fi
+    {
+        echo "# Starting CloudStack database deployment..."
+        cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i "$cloudbr0_ip" 2>&1 | \
+            while IFS= read -r line; do
+                echo "$line"
+                echo "XXX"
+                echo "50"
+                echo "Deploying CloudStack Database...\n\n$line"
+                echo "XXX"
+            done
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Database Deployment" \
+               --gauge "Starting database deployment..." 10 70 0
 
-    # Deploy CloudStack database
-    dialog --infobox "Deploying CloudStack Database..." 5 50
-    cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i "$cloudbr0_ip"
+    {
+        echo "# Starting CloudStack Management Server setup..."
+        cloudstack-setup-management 2>&1 | \
+            while IFS= read -r line; do
+                echo "$line"
+                echo "XXX"
+                echo "75"
+                echo "Deploying Management Server...\n\n$line"
+                echo "XXX"
+            done
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Management Server Setup" \
+               --gauge "Starting management server setup..." 10 70 0
 
-    # Deploy management server
-    dialog --infobox "Deploying CloudStack Management Server..." 5 50
-    cloudstack-setup-management
-
-    dialog --title "Success" --msgbox "CloudStack Management Server has been configured." 7 60
+    sleep 10
+    echo "100" | dialog --title "Success" --msgbox "CloudStack Management Server has been configured." 7 60
 }
 
 
@@ -643,12 +668,12 @@ EOF
         echo "85"
         echo "# Configuring firewall..."
         ports=(
-            "22/tcp"           # SSH
-            "1798/tcp"         # CloudStack Management Server
-            "16509/tcp"        # Libvirt
-            "16514/tcp"        # Libvirt
-            "5900:6100/tcp"    # VNC
-            "49152:49216/tcp"  # Live Migration
+            "22"           # SSH
+            "1798"         # CloudStack Management Server
+            "16509"        # Libvirt
+            "16514"        # Libvirt
+            "5900:6100"    # VNC
+            "49152:49216"  # Live Migration
         )
         case "$OS_TYPE" in
             ubuntu|debian)
@@ -700,12 +725,253 @@ EOF
     fi
 }
 
-show_final_summary() {
-    echo "Summary mgmt server"
+wait_for_management_server() {
+    local timeout=300  # 5 minutes timeout
+    local interval=10  # Check every 10 seconds
+    local elapsed=0
+    local url="http://$HOST_IP:8080/client/api"
+
+    {
+        while [ $elapsed -lt $timeout ]; do
+            echo "XXX"
+            echo "$((elapsed * 100 / timeout))"
+            echo "Waiting for Management Server to be ready...\n\nElapsed time: ${elapsed}s / ${timeout}s"
+            echo "XXX"
+            
+            local status_code=$(curl -s -o /dev/null -w "%{http_code}" "$url")
+            if [[ "$status_code" == "200" || "$status_code" == "401" ]]; then
+                echo "XXX"
+                echo "100"
+                echo "Management Server is ready!"
+                echo "XXX"
+                return 0
+            fi
+            
+            sleep $interval
+            elapsed=$((elapsed + interval))
+        done
+
+        echo "XXX"
+        echo "100"
+        echo "Timeout waiting for Management Server!"
+        echo "XXX"
+        return 1
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Management Server Check" \
+               --gauge "Waiting for Management Server to start..." 10 70 0
+}
+
+check_cloudmonkey() {
+    {
+        echo "10"
+        echo "# Checking CloudMonkey installation..."
+        if ! command -v cmk &>/dev/null; then
+            echo "XXX"
+            echo "100"
+            echo "CloudMonkey (cmk) not found!"
+            echo "XXX"
+            return 1
+        fi
+
+        echo "50"
+        echo "# Initializing CloudMonkey..."
+        if ! cmk sync &>/dev/null; then
+            echo "XXX"
+            echo "100"
+            echo "Failed to initialize CloudMonkey!"
+            echo "XXX"
+            return 1
+        fi
+
+        echo "100"
+        echo "# CloudMonkey ready!"
+        return 0
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "CloudMonkey Check" \
+               --gauge "Checking CloudMonkey..." 8 60 0
+}
+
+show_cloudstack_banner() {
+    local banner="
+    █████████████████████████████████████████████████████████████
+    █─▄▄▄─█▄─▄███─▄▄─█▄─██─▄█▄─▄▄▀█─▄▄▄▄█─▄─▄─██▀▄─██─▄▄▄─█▄─█─▄█
+    █─███▀██─██▀█─██─██─██─███─██─█▄▄▄▄─███─████─▀─██─███▀██─▄▀██
+    ▀▄▄▄▄▄▀▄▄▄▄▄▀▄▄▄▄▀▀▄▄▄▄▀▀▄▄▄▄▀▀▄▄▄▄▄▀▀▄▄▄▀▀▄▄▀▄▄▀▄▄▄▄▄▀▄▄▀▄▄▀
+
+    CloudStack Installation Complete!
+    --------------------------------
+    Access Details:
+
+    URL: http://$HOST_IP:8080/client
+    Username: admin
+    Password: password
+
+    Note: Please change the default password after first login.
+    "
+
+    dialog --backtitle "$SCRIPT_NAME" \
+        --title "Installation Complete" \
+        --colors \
+        --msgbox "\Z1$banner\Zn" 20 70
 }
 
 deploy_zone() {
-    echo "Deploying zone"
+    HOST_IP=$(ip -4 addr show "$BRIDGE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+    GATEWAY=$(ip route | grep default | grep "$BRIDGE" | awk '{print $3}')
+    
+    if [[ -z "$HOST_IP" || -z "$GATEWAY" ]]; then
+        error_exit "Could not determine host IP or gateway. Is bridge $BRIDGE configured properly?"
+    fi
+
+    # Prompt for root password before starting zone deployment
+    local root_pass=$(dialog --backtitle "$SCRIPT_NAME" \
+        --title "Host Configuration" \
+        --insecure \
+        --passwordbox "Enter root password for KVM host ($HOST_IP):" 8 60 \
+        3>&1 1>&2 2>&3)
+
+    # Check if password was provided
+    if [[ -z "$root_pass" ]]; then
+        dialog --msgbox "Root password is required for host addition. Zone deployment cancelled." 8 60
+        return 1
+    fi
+
+    if ! wait_for_management_server; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Error" \
+               --msgbox "Management Server did not become ready in time.\nPlease check the server status and logs." 8 60
+        return 1
+    fi
+
+    if ! check_cloudmonkey; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Error" \
+               --msgbox "CloudMonkey is not available or failed to initialize.\nPlease install CloudMonkey and try again." 8 60
+        return 1
+    fi
+
+    local zone_id=""
+    local pod_id=""
+    local cluster_id=""
+    local result_file=$(mktemp)    
+    {
+        echo "10"
+        echo "# Creating Zone..."
+        # Create Zone
+        zone_id=$(cmk create zone name="Zone1" \
+            networktype=Advanced \
+            dns1="$DNS" \
+            internaldns1="$DNS" \
+            localstorageenabled=true \
+            securitygroupenabled=false \
+            guestcidraddress="172.16.1.0/24" | jq -r '.zone.id')
+
+        [[ -z "$zone_id" ]] && error_exit "Failed to create zone"
+        echo "$zone_id" > "$result_file.zone"
+
+        echo "20"
+        echo "# Creating Physical Network..."
+        # Create Physical Network
+        local phy_id=$(cmk create physicalnetwork name="Physical Network 1" \
+            zoneid="$zone_id" \
+            isolationmethods="VLAN" | jq -r '.physicalnetwork.id')
+        
+        [[ -z "$phy_id" ]] && error_exit "Failed to create physical network"
+        
+        echo "30"
+        echo "# Adding Traffic Types..."
+        # Add Traffic Types
+        cmk add traffictype traffictype=Management physicalnetworkid="$phy_id"
+        cmk add traffictype traffictype=Guest physicalnetworkid="$phy_id"
+        cmk add traffictype traffictype=Public physicalnetworkid="$phy_id"
+        
+        echo "40"
+        echo "# Configuring Virtual Router..."
+        # Configure Virtual Router Provider
+        cmk update physicalnetwork state=Enabled id="$phy_id"
+        
+        local nsp_id=$(cmk list networkserviceproviders name=VirtualRouter physicalnetworkid="$phy_id" | jq -r '.networkserviceprovider[0].id')
+        local vre_id=$(cmk list virtualrouterelements nspid="$nsp_id" | jq -r '.virtualrouterelement[0].id')
+        
+        cmk configure virtualrouterelement enabled=true id="$vre_id"
+        cmk update networkserviceprovider state=Enabled id="$nsp_id"
+        
+        echo "50"
+        echo "# Creating Pod..."
+        pod_id=$(cmk create pod name="Pod1" \
+            zoneid="$zone_id" \
+            gateway="$GATEWAY" \
+            netmask="255.255.255.0" \
+            startip="${HOST_IP%.*}.10" \
+            endip="${HOST_IP%.*}.20" | jq -r '.pod.id')
+        
+        [[ -z "$pod_id" ]] && error_exit "Failed to create pod"
+        echo "$pod_id" > "$result_file.pod"
+        
+        echo "60"
+        echo "# Adding Cluster..."
+        cluster_id=$(cmk add cluster \
+            zoneid="$zone_id" \
+            podid="$pod_id" \
+            clustername="Cluster1" \
+            clustertype=CloudManaged \
+            hypervisor=KVM | jq -r '.cluster[0].id')
+
+        [[ -z "$cluster_id" ]] && error_exit "Failed to add cluster"
+        echo "$cluster_id" > "$result_file.cluster"
+        
+        echo "70"
+        echo "# Adding Host..."
+        # Add Host
+        cmk add host zoneid="$zone_id" \
+            podid="$pod_id" \
+            clusterid="$cluster_id" \
+            hypervisor=KVM \
+            username=root \
+            password="$root_pass" \
+            url="http://$HOST_IP"
+        
+        echo "80"
+        echo "# Adding Primary Storage..."
+        # Add Primary Storage
+        cmk create storagepool name="Primary1" \
+            zoneid="$zone_id" \
+            podid="$pod_id" \
+            clusterid="$cluster_id" \
+            url="nfs://$HOST_IP/export/primary" \
+            hypervisor=KVM \
+            scope=zone
+        
+        echo "90"
+        echo "# Adding Secondary Storage..."
+        # Add Secondary Storage
+        cmk add imagestore name="Secondary1" \
+            zoneid="$zone_id" \
+            url="nfs://$HOST_IP/export/secondary" \
+            provider=NFS
+
+        echo "95"
+        echo "# Enabling Zone..."
+        cmk update zone allocationstate=Enabled id="$zone_id"
+        
+        echo "100"
+        echo "# Zone deployment completed successfully!"
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Zone Deployment" \
+               --gauge "Deploying CloudStack Zone..." 10 70 0
+    
+    zone_id=$(cat "$result_file.zone")
+    pod_id=$(cat "$result_file.pod")
+    cluster_id=$(cat "$result_file.cluster")
+
+    # Cleanup temp files
+    rm -f "$result_file"* 2>/dev/null
+
+    # Show final success message
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Success" \
+           --msgbox "CloudStack Zone has been successfully deployed!\n\nZone Details:\n- Zone ID: $zone_id\n- Pod ID: $pod_id\n- Cluster ID: $cluster_id" 12 60
+    show_cloudstack_banner
 }
 
 select_zone_deployment() {
@@ -1072,14 +1338,14 @@ show_validation_summary() {
                --title "Validation Summary" \
                --colors \
                --msgbox "\Z2✓ All components are properly configured!\n\n\ZnComponent Status:\n\n$summary" 20 70
+        return 0
     else
         dialog --backtitle "$SCRIPT_NAME" \
                --title "Validation Summary" \
                --colors \
                --msgbox "\Z1⚠ Some components need attention!\n\n\ZnComponent Status:\n\n$summary" 20 70
+        return 1
     fi
-
-    return $status_ok
 }
 
 configure_prerequisites() {
@@ -1129,10 +1395,6 @@ main() {
                 --title "Zone Deployment" \
                 --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
     fi
-    
-    # Show final summary
-    show_final_summary
-    
     log "CloudStack installation script completed successfully"
     exit 0
 }
