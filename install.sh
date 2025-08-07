@@ -242,7 +242,7 @@ deploy_cloudstack() {
     return
   fi
   info "Deploying CloudStack Database"
-  cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: #-i <cloudbr0 IP here>
+  cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i $HOST_IP
   info "Deploying CloudStack Management Server"
   cloudstack-setup-management
 }
