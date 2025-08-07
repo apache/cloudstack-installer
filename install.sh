@@ -86,8 +86,8 @@ setup_bridge() {
 
   interface=$(find /sys/class/net -type l -not -lname '*virtual*' -printf '%f\n' | sort | head -1)
   gateway=$(ip route show 0.0.0.0/0 dev $interface | cut -d ' ' -f 3)
-  hostipandsub=$(ip -4 -br addr show ens192 | awk '{ print $3; }' )
-  info "Setting up bridge on $interface which has IP $hostip and gateway $gateway"
+  hostipandsub=$(ip -4 -br addr show $interface | awk '{ print $3; }' )
+  info "Setting up bridge on $interface which has IP $hostipandsub and gateway $gateway"
 
   cat << EOF > /etc/netplan/01-netcfg.yaml
 network:
