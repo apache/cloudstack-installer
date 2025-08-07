@@ -232,6 +232,8 @@ configure_host() {
     info "KVM host configured"
     virsh nodeinfo
   fi
+  virsh net-destroy default || true
+  virsh net-undefine default || true
 }
 
 deploy_cloudstack() {
