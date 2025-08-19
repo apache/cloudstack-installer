@@ -71,7 +71,7 @@ warn "Work in progress, try again while this is being hacked"
 
 ### Setup Prerequisites ###
 info "Installing dependencies"
-#apt-get update
+apt-get update
 apt-get install -y openssh-server sudo wget jq htop tar nmap bridge-utils
 
 # FIXME: check for host spec (min 4-8G RAM?) /dev/kvm and
@@ -86,8 +86,8 @@ setup_bridge() {
 
   interface=$(find /sys/class/net -type l -not -lname '*virtual*' -printf '%f\n' | sort | head -1)
   gateway=$(ip route show 0.0.0.0/0 dev $interface | cut -d ' ' -f 3)
-  hostipandsub=$(ip -4 -br addr show ens192 | awk '{ print $3; }' )
-  info "Setting up bridge on $interface which has IP $hostip and gateway $gateway"
+  hostipandsub=$(ip -4 -br addr show $interface | awk '{ print $3; }' )
+  info "Setting up bridge on $interface which has IP $hostipandsub and gateway $gateway"
 
   cat << EOF > /etc/netplan/01-netcfg.yaml
 network:
@@ -232,6 +232,8 @@ configure_host() {
     info "KVM host configured"
     virsh nodeinfo
   fi
+  virsh net-destroy default || true
+  virsh net-undefine default || true
 }
 
 deploy_cloudstack() {
@@ -240,7 +242,7 @@ deploy_cloudstack() {
     return
   fi
   info "Deploying CloudStack Database"
-  cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: #-i <cloudbr0 IP here>
+  cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i $HOST_IP
   info "Deploying CloudStack Management Server"
   cloudstack-setup-management
 }
