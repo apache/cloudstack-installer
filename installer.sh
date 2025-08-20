@@ -31,6 +31,7 @@ OS_TYPE=""
 PACKAGE_MANAGER=""
 SELECTED_COMPONENTS=()
 ZONE_TYPE=""
+MYSQL_SERVICE=""
 
 CS_VERSION=4.20
 INTERFACE=
@@ -85,16 +86,28 @@ check_root() {
 }
 
 check_available_memory() {
-    MIN_RAM_KB=$((8 * 1024 * 1024))  # 8 GB in KB
+    MIN_RAM_KB=$((5 * 1024 * 1024))  # 8 GB in KB
     TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 
     # Check if RAM is within the desired range
     if [ "$TOTAL_RAM_KB" -ge "$MIN_RAM_KB" ]; then
-        log "RAM check passed: $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB"
+        success_msg "RAM check passed: $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB"
     else
         error_exit "RAM check failed: System has $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB RAM"
-        exit 1
     fi
+}
+
+check_kvm_support() {
+    info_msg "Checking KVM prerequisites..."
+    if ! grep -E 'vmx|svm' /proc/cpuinfo >/dev/null; then
+        error_exit "CPU does not support hardware virtualization (KVM)"
+    fi
+    success_msg "✓ CPU virtualization support detected$"
+
+    if ! lsmod | grep -q kvm; then
+        error_exit "KVM kernel module is not loaded"
+    fi
+    success_msg "✓ KVM kernel module loaded$"
 }
 
 # Function to detect the OS type and pkg mgr
@@ -108,14 +121,13 @@ detect_os() {
     OS_VERSION=$VERSION_ID
     
     case "$OS_TYPE" in
-        ubuntu)
+        ubuntu|debian)
             PACKAGE_MANAGER="apt"
-            ;;
-        debian)
-            PACKAGE_MANAGER="apt"
+            MYSQL_SERVICE="mysql"
             ;;
         rhel|centos|fedora|rocky|alma)
             PACKAGE_MANAGER="dnf"
+            MYSQL_SERVICE="mysqld"
             ;;
         *)
             echo "Unsupported OS: $OS_TYPE"
@@ -139,6 +151,74 @@ get_ubuntu_codename_for_debian() {
             return 1
             ;;
     esac
+}
+
+update_system() {
+    {
+        echo "10"
+        echo "# Updating package cache..."
+        case "$PACKAGE_MANAGER" in
+            apt)
+                apt-get update 2>&1 | while IFS= read -r line; do
+                    echo "XXX"
+                    echo "30"
+                    echo "# Updating package lists...\n\n$line"
+                    echo "XXX"
+                done
+
+                echo "40"
+                echo "# Installing system updates..."
+                apt-get upgrade -y 2>&1 | while IFS= read -r line; do
+                    echo "XXX"
+                    echo "75"
+                    echo "# Installing updates...\n\n$line"
+                    echo "XXX"
+                done
+                ;;
+            dnf)
+                dnf clean all 2>&1 | while IFS= read -r line; do
+                    echo "XXX"
+                    echo "20"
+                    echo "# Cleaning package cache...\n\n$line"
+                    echo "XXX"
+                done
+
+                dnf makecache 2>&1 | while IFS= read -r line; do
+                    echo "XXX"
+                    echo "40"
+                    echo "# Updating package cache...\n\n$line"
+                    echo "XXX"
+                done
+
+                dnf update -y 2>&1 | while IFS= read -r line; do
+                    echo "XXX"
+                    echo "75"
+                    echo "# Installing system updates...\n\n$line"
+                    echo "XXX"
+                done
+                ;;
+        esac
+
+        echo "XXX"
+        echo "100"
+        echo "# System update complete!"
+        echo "XXX"
+        sleep 2
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "System Update" \
+               --gauge "Updating system packages..." 15 70 0
+
+    # Verify update success
+    if [[ $? -eq 0 ]]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Success" \
+               --msgbox "System packages have been successfully updated." 6 50
+    else
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Error" \
+               --msgbox "Failed to update system packages. Please check the logs." 6 50
+        return 1
+    fi
 }
 
 configure_cloudstack_repo() {
@@ -167,17 +247,6 @@ configure_cloudstack_repo() {
                     echo "ERROR: Failed to add CloudStack repository."
                     exit 1
                 fi
-                
-                echo "Updating package list..."
-                apt-get update 2>&1 | while IFS= read -r line; do
-                    echo "$line"
-                done
-                if [ ${PIPESTATUS[0]} -eq 0 ]; then
-                    echo "Package list updated successfully."
-                else
-                    echo "ERROR: Failed to update package list."
-                    exit 1
-                fi
 
                 echo "Repository configuration completed."
             } | dialog --backtitle "$SCRIPT_NAME" \
@@ -186,45 +255,35 @@ configure_cloudstack_repo() {
             ;;
             
         rhel|centos|fedora|rocky|alma)
-            {
-                echo "Configuring CloudStack repository..."
-                echo "Adding CloudStack's signing key..."
-                if curl -fsSL https://download.cloudstack.org/release.asc | tee /etc/pki/rpm-gpg/CloudStack.asc > /dev/null; then
-                    echo "CloudStack signing key added successfully."
-                else
-                    echo "ERROR: Failed to add CloudStack signing key."
-                    exit 1
-                fi
-                
-                echo "Adding CloudStack repository..."
-                {
-                    echo "[cloudstack]"
-                    echo "name=CloudStack Repo"
-                    echo "baseurl=https://download.cloudstack.org/centos/$OS_VERSION/$CS_VERSION/"
-                    echo "enabled=1"
-                    echo "gpgcheck=1"
-                    echo "gpgkey=https://download.cloudstack.org/release.asc"
-                } | tee /etc/yum.repos.d/cloudstack.repo > /dev/null
-                
-                if [ $? -eq 0 ]; then
-                    echo "CloudStack repository added successfully."
-                else
-                    echo "ERROR: Failed to add CloudStack repository."
-                    exit 1
-                fi
-                
-                echo "Updating system packages..."
-                if dnf update -y > /dev/null 2>&1; then
-                    echo "System packages updated successfully."
-                else
-                    echo "ERROR: Failed to update system packages."
-                    exit 1
-                fi
-                echo "Repository configuration completed."
-            } | dialog --backtitle "$SCRIPT_NAME" \
-                       --title "Repository Configuration" \
-                       --progressbox "Configuring CloudStack repository..." 15 70
-            ;;
+        {
+            echo "20"
+            echo "# Adding CloudStack repository..."
+            # Create repo file
+            if cat > /etc/yum.repos.d/cloudstack.repo <<EOF
+[cloudstack]
+name=CloudStack
+baseurl=https://download.cloudstack.org/centos/8/$CS_VERSION/
+enabled=1
+gpgcheck=0
+gpgkey=https://download.cloudstack.org/release.asc
+EOF
+            then
+                echo "60"
+                echo "# Repository added successfully"
+            else
+                echo "XXX"
+                echo "100"
+                echo "# Failed to create repository file"
+                echo "XXX"
+                exit 1
+            fi
+
+            echo "100"
+            echo "# Repository configuration completed!"
+        } | dialog --backtitle "$SCRIPT_NAME" \
+                --title "Repository Configuration" \
+                --gauge "Configuring CloudStack repository..." 15 70 0
+                ;;
             
         *)
             dialog --msgbox "Unsupported OS: $OS_TYPE" 6 50
@@ -277,35 +336,19 @@ install_base_dependencies() {
                --msgbox "Base dependencies installed successfully" 10 60
 }
 
-update_system() {
-    echo "Updating the system..."
-    case "$PACKAGE_MANAGER" in
-        apt)
-            sudo apt-get update && sudo apt-get upgrade -y
-            ;;
-        dnf)
-            sudo dnf update -y
-            ;;
-    esac
-}
-
 # Function to install packages based on the detected OS
 install_package() {
     local package_name=$1
-    {
-        echo "Installing $package_name..."
-        case "$PACKAGE_MANAGER" in
-            apt)
-                sudo apt-get install -y "$package_name"
-                ;;
-            dnf)
-                sudo dnf install -y "$package_name"
-                ;;
-        esac
-    } | dialog --backtitle "$SCRIPT_NAME" \
-               --title "Installing Packages" \
-               --gauge "Installing $package_name..." 10 70
-    
+    case "$PACKAGE_MANAGER" in
+        apt)
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package_name" &>/dev/null
+            return $?
+            ;;
+        dnf)
+            dnf install -y "$package_name" &>/dev/null
+            return $?
+            ;;
+    esac
 }
 
 # Install common packages
@@ -380,56 +423,81 @@ select_components() {
 install_components() {
     local total_steps=${#SELECTED_COMPONENTS[@]}
     local current_step=0
-    
-    for component in "${SELECTED_COMPONENTS[@]}"; do
-        current_step=$((current_step + 1))
-        local progress=$((current_step * 100 / total_steps))
-        
-        # Show progress
-        echo "$progress" | dialog --backtitle "$SCRIPT_NAME" \
-                                 --title "Installing Components" \
-                                 --gauge "Installing $component..." 10 70
-        
-        case "$component" in
-            management)
-                install_management_server
-                ;;
-            usage)
-                install_usage_server
-                ;;
-            kvm)
-                install_kvm_agent
-                ;;
-            mysql)
-                install_mysql_server
-                ;;
-            nfs)
-                install_nfs_server
-                ;;
-            common)
-                install_common_packages
-                ;;
-        esac
-        
-        sleep 1  # Brief pause for user experience
-    done
-    
-    # Final progress update
-    echo "100" | dialog --backtitle "$SCRIPT_NAME" \
-                       --title "Installation Complete" \
-                       --gauge "All components installed successfully!" 10 70
-    
-    sleep 2
+
+    {
+        for component in "${SELECTED_COMPONENTS[@]}"; do
+            current_step=$((current_step + 1))
+            local progress=$((current_step * 100 / total_steps))
+            
+            echo "XXX"
+            echo "$progress"
+            echo "Installing $component..."
+            echo "XXX"
+            
+            case "$component" in
+                management)
+                    install_management_server
+                    ;;
+                usage)
+                    install_usage_server
+                    ;;
+                kvm)
+                    install_kvm_agent
+                    ;;
+                mysql)
+                    install_mysql_server
+                    ;;
+                nfs)
+                    install_nfs_server
+                    ;;
+                common)
+                    install_common_packages
+                    ;;
+            esac
+            
+            sleep 1
+        done
+
+        # Show final 100% progress
+        echo "XXX"
+        echo "100"
+        echo "All components installed successfully!"
+        echo "XXX"
+        sleep 2
+    } | dialog --backtitle "$SCRIPT_NAME" \
+               --title "Installing Components" \
+               --gauge "Starting installation..." 10 70 0
 }
 
 configure_mysql() {
   MYSQL_VERSION=$(mysql -V 2>/dev/null || echo "MySQL not found")
   dialog --title "MySQL Configuration" --msgbox "Detected MySQL Version:\n$MYSQL_VERSION" 8 50
+  if [[ "$MYSQL_VERSION" == "MySQL not found" ]]; then
+    dialog --title "Error" --msgbox "MySQL is not installed. Please install MySQL first." 6 50
+    return 1
+  fi
 
-  if [[ -f "/etc/mysql/mysql.conf.d/cloudstack.cnf" ]]; then
-    dialog --title "MySQL Configuration" --msgbox "Configuration already exists.\nSkipping MySQL setup." 6 50
+  local mysql_conf_dir
+  case "$PACKAGE_MANAGER" in
+    apt)
+        mysql_conf_dir="/etc/mysql/mysql.conf.d"
+        ;;
+    dnf)
+        mysql_conf_dir="/etc/my.cnf.d"
+        ;;
+    *)
+        dialog --title "Error" --msgbox "Unsupported package manager for MySQL configuration" 6 50
+        return 1
+        ;;
+  esac
+  
+  local config_file="$mysql_conf_dir/cloudstack.cnf"
+  if [[ -f "$config_file" ]]; then
+    dialog --title "MySQL Configuration" --msgbox "Configuration already exists at:\n$config_file\nSkipping MySQL setup." 8 60
     return
   fi
+
+  mkdir -p "$mysql_conf_dir"
 
   dialog --yesno "Do you want to configure MySQL for CloudStack?" 7 50
   response=$?
@@ -438,14 +506,22 @@ configure_mysql() {
     return
   fi
 
+  # ensure mysql is running
+  if ! systemctl is-active --quiet mysql; then
+    dialog --msgbox "MySQL service is not running. Bringing it up..." 6 50
+    systemctl start $MYSQL_SERVICE
+    sleep 5
+  fi
+
+  dialog --title "MySQL Configuration" --msgbox "Configuring MYSQL for CloudStack..." 6 50
   sqlmode="$(mysql -B -e "show global variables like 'sql_mode'" 2>/dev/null | grep sql_mode | awk '{ print $2; }' | sed -e 's/ONLY_FULL_GROUP_BY,//')"
 
   if [[ -z "$sqlmode" ]]; then
     dialog --msgbox "Failed to fetch current SQL mode. Aborting." 6 50
     return 1
   fi
-
-  cat > /etc/mysql/mysql.conf.d/cloudstack.cnf <<EOF
+  
+  cat > "$config_file" <<EOF
 [mysqld]
 server_id = 1
 sql_mode = "$sqlmode"
@@ -456,7 +532,7 @@ log_bin = mysql-bin
 binlog_format = "ROW"
 EOF
 
-  systemctl restart mysql && \
+  systemctl restart $MYSQL_SERVICE && \
     dialog --msgbox "MySQL has been configured and restarted successfully." 6 50 || \
     dialog --msgbox "Failed to restart MySQL. Please check the service manually." 6 60
 }
@@ -543,7 +619,7 @@ configure_management_server() {
 
     dialog --title "Info" --msgbox "Using IP address: $cloudbr0_ip for CloudStack DB setup." 7 60
     # Check if MySQL is running
-    if ! systemctl is-active mysql > /dev/null; then
+    if ! systemctl is-active $MYSQL_SERVICE > /dev/null; then
         dialog --title "Error" --msgbox "MySQL service is not running. Please start MySQL before proceeding." 7 60
         return 1
     fi
@@ -852,25 +928,33 @@ deploy_zone() {
 
     local zone_id=""
     local pod_id=""
-    local cluster_id=""
-    local result_file=$(mktemp)    
+    local cluster_id="" 
     {
+        echo "XXX"
         echo "10"
-        echo "# Creating Zone..."
-        # Create Zone
-        zone_id=$(cmk create zone name="Zone1" \
+        echo "Creating Zone..."
+        echo "XXX"
+
+        zone_output=$(cmk create zone name="Zone1" \
             networktype=Advanced \
             dns1="$DNS" \
             internaldns1="$DNS" \
             localstorageenabled=true \
             securitygroupenabled=false \
-            guestcidraddress="172.16.1.0/24" | jq -r '.zone.id')
+            guestcidraddress="172.16.1.0/24")
+        
+        if ! zone_id=$(echo "$zone_output" | jq -r '.zone.id' 2>/dev/null); then
+            echo "XXX"
+            echo "100"
+            echo "Failed to create zone: $zone_output"
+            echo "XXX"
+            return 1
+        fi
 
-        [[ -z "$zone_id" ]] && error_exit "Failed to create zone"
-        echo "$zone_id" > "$result_file.zone"
-
+        echo "XXX"
         echo "20"
-        echo "# Creating Physical Network..."
+        echo "Creating Physical Network..."
+        echo "XXX"
         # Create Physical Network
         local phy_id=$(cmk create physicalnetwork name="Physical Network 1" \
             zoneid="$zone_id" \
@@ -878,15 +962,19 @@ deploy_zone() {
         
         [[ -z "$phy_id" ]] && error_exit "Failed to create physical network"
         
+        echo "XXX"
         echo "30"
-        echo "# Adding Traffic Types..."
+        echo "Adding Traffic Types..."
+        echo "XXX"
         # Add Traffic Types
         cmk add traffictype traffictype=Management physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Guest physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Public physicalnetworkid="$phy_id"
         
+        echo "XXX"
         echo "40"
-        echo "# Configuring Virtual Router..."
+        echo "Configuring Virtual Router..."
+        echo "XXX"
         # Configure Virtual Router Provider
         cmk update physicalnetwork state=Enabled id="$phy_id"
         
@@ -896,8 +984,10 @@ deploy_zone() {
         cmk configure virtualrouterelement enabled=true id="$vre_id"
         cmk update networkserviceprovider state=Enabled id="$nsp_id"
         
+        echo "XXX"
         echo "50"
-        echo "# Creating Pod..."
+        echo "Creating Pod..."
+        echo "XXX"
         pod_id=$(cmk create pod name="Pod1" \
             zoneid="$zone_id" \
             gateway="$GATEWAY" \
@@ -906,10 +996,11 @@ deploy_zone() {
             endip="${HOST_IP%.*}.20" | jq -r '.pod.id')
         
         [[ -z "$pod_id" ]] && error_exit "Failed to create pod"
-        echo "$pod_id" > "$result_file.pod"
         
+        echo "XXX"
         echo "60"
-        echo "# Adding Cluster..."
+        echo "Adding Cluster..."
+        echo "XXX"
         cluster_id=$(cmk add cluster \
             zoneid="$zone_id" \
             podid="$pod_id" \
@@ -918,10 +1009,11 @@ deploy_zone() {
             hypervisor=KVM | jq -r '.cluster[0].id')
 
         [[ -z "$cluster_id" ]] && error_exit "Failed to add cluster"
-        echo "$cluster_id" > "$result_file.cluster"
         
+        echo "XXX"
         echo "70"
-        echo "# Adding Host..."
+        echo "Adding Host..."
+        echo "XXX"
         # Add Host
         cmk add host zoneid="$zone_id" \
             podid="$pod_id" \
@@ -931,8 +1023,10 @@ deploy_zone() {
             password="$root_pass" \
             url="http://$HOST_IP"
         
+        echo "XXX"
         echo "80"
-        echo "# Adding Primary Storage..."
+        echo "Adding Primary Storage..."
+        echo "XXX"
         # Add Primary Storage
         cmk create storagepool name="Primary1" \
             zoneid="$zone_id" \
@@ -942,35 +1036,34 @@ deploy_zone() {
             hypervisor=KVM \
             scope=zone
         
+        echo "XXX"
         echo "90"
-        echo "# Adding Secondary Storage..."
+        echo "Adding Secondary Storage..."
+        echo "XXX"
         # Add Secondary Storage
         cmk add imagestore name="Secondary1" \
             zoneid="$zone_id" \
             url="nfs://$HOST_IP/export/secondary" \
             provider=NFS
 
+        echo "XXX"
         echo "95"
-        echo "# Enabling Zone..."
+        echo "Enabling Zone..."
+        echo "XXX"
         cmk update zone allocationstate=Enabled id="$zone_id"
         
+        echo "XXX"
         echo "100"
-        echo "# Zone deployment completed successfully!"
+        echo "Zone deployment completed successfully!"
+        echo "XXX"
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Zone Deployment" \
                --gauge "Deploying CloudStack Zone..." 10 70 0
-    
-    zone_id=$(cat "$result_file.zone")
-    pod_id=$(cat "$result_file.pod")
-    cluster_id=$(cat "$result_file.cluster")
-
-    # Cleanup temp files
-    rm -f "$result_file"* 2>/dev/null
 
     # Show final success message
     dialog --backtitle "$SCRIPT_NAME" \
            --title "Success" \
-           --msgbox "CloudStack Zone has been successfully deployed!\n\nZone Details:\n- Zone ID: $zone_id\n- Pod ID: $pod_id\n- Cluster ID: $cluster_id" 12 60
+           --msgbox "CloudStack Zone has been successfully deployed!" 12 60
     show_cloudstack_banner
 }
 
@@ -1028,7 +1121,7 @@ configure_components() {
     # 3. Configure Management Server (if selected)
     if is_component_selected "management"; then
         # Check if dependencies are configured
-        if is_component_selected "mysql" && ! systemctl is-active --quiet mysql; then
+        if is_component_selected "mysql" && ! systemctl is-active --quiet $MYSQL_SERVICE; then
             dialog --backtitle "$SCRIPT_NAME" \
                    --title "Error" \
                    --msgbox "MySQL must be running before configuring Management Server" 6 60
@@ -1181,37 +1274,108 @@ EOF
         fi
 
     elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle|rocky)$ ]]; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --infobox "Configuring bridge $BRIDGE using NetworkManager..." 5 50
-        sleep 1
+        {
+            echo "10"
+            echo "# Configuring bridge interface $BRIDGE..."
+            
+            # Create bridge
+            if output=$(nmcli connection add type bridge \
+                con-name "$BRIDGE" \
+                ifname "$BRIDGE" \
+                ipv4.addresses "$hostipandsub" \
+                ipv4.gateway "$gateway" \
+                ipv4.dns "$DNS" \
+                ipv4.method manual \
+                autoconnect yes 2>&1); then
+                echo "XXX"
+                echo "30"
+                echo "# Bridge created successfully\n$output"
+                echo "XXX"
+            else
+                echo "XXX"
+                echo "100"
+                echo "# Failed to create bridge: $output"
+                echo "XXX"
+                exit 1
+            fi
 
-        configure_cloud_init
+            sleep 2
+            
+            # Add ethernet interface as slave
+            echo "XXX"
+            echo "50"
+            echo "# Adding interface $interface to bridge..."
+            echo "XXX"
+            
+            local slave_name="${interface}-slave-$BRIDGE"
+            if output=$(nmcli connection add type ethernet \
+                slave-type bridge \
+                con-name "$slave_name" \
+                ifname "$interface" \
+                master "$BRIDGE" 2>&1); then
+                echo "XXX"
+                echo "70"
+                echo "# Interface added successfully\n$output"
+                echo "XXX"
+            else
+                echo "XXX"
+                echo "100"
+                echo "# Failed to add interface: $output"
+                echo "XXX"
+                exit 1
+            fi
 
-        # Create bridge
-        nmcli connection add type bridge \
-            con-name "$BRIDGE" \
-            ifname "$BRIDGE" \
-            ipv4.addresses "$hostipandsub" \
-            ipv4.gateway "$gateway" \
-            ipv4.dns "$DNS" \
-            ipv4.method manual \
-            autoconnect yes
+            sleep 2
 
-        # Add ethernet interface as a slave to the bridge
-        local slave_name="${interface}-slave-$BRIDGE"
-        nmcli connection add type ethernet \
-            slave-type bridge \
-            con-name "$slave_name" \
-            ifname "$interface" \
-            master "$BRIDGE"
+            # Activate connections
+            echo "XXX"
+            echo "90"
+            echo "# Activating network connections..."
+            echo "XXX"
+            
+            if output=$(nmcli connection up "$slave_name" 2>&1); then
+                echo "XXX"
+                echo "95"
+                echo "# Slave interface activated\n$output"
+                echo "XXX"
+            else
+                echo "XXX"
+                echo "100"
+                echo "# Failed to activate slave interface: $output"
+                echo "XXX"
+                exit 1
+            fi
 
-        # Activate connections
-        nmcli connection up "$slave_name" || warn_msg "Failed to bring up slave interface"
-        nmcli connection up "$BRIDGE" || error_exit "Failed to bring up bridge"
+            if output=$(nmcli connection up "$BRIDGE" 2>&1); then
+                echo "XXX"
+                echo "100"
+                echo "# Bridge activated successfully\n$output"
+                echo "XXX"
+            else
+                echo "XXX"
+                echo "100"
+                echo "# Failed to activate bridge: $output"
+                echo "XXX"
+                exit 1
+            fi
 
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Success" \
-               --msgbox "Bridge $BRIDGE configured successfully with NetworkManager." 7 60
+            sleep 2
+
+        } | dialog --backtitle "$SCRIPT_NAME" \
+                --title "Network Configuration" \
+                --gauge "Configuring network with NetworkManager..." 10 70 0
+
+        # Verify the configuration
+        if ip link show "$BRIDGE" &>/dev/null; then
+            dialog --backtitle "$SCRIPT_NAME" \
+                --title "Success" \
+                --msgbox "Bridge $BRIDGE configured successfully with NetworkManager." 7 60
+        else
+            dialog --backtitle "$SCRIPT_NAME" \
+                --title "Error" \
+                --msgbox "Failed to configure bridge $BRIDGE. Check system logs." 7 60
+            return 1
+        fi
     else
         error_exit "Unsupported OS type: $OS_TYPE"
     fi
@@ -1244,7 +1408,7 @@ show_validation_summary() {
         if [[ " ${SELECTED_COMPONENTS[@]} " =~ " mysql " ]]; then
             echo "30"
             echo "# Checking MySQL..."
-            if systemctl is-active --quiet mysql; then
+            if systemctl is-active --quiet $MYSQL_SERVICE; then
                 if [[ -f "/etc/mysql/mysql.conf.d/cloudstack.cnf" ]]; then
                     summary+="✓ MySQL: Running and configured\n"
                 else
@@ -1328,6 +1492,8 @@ show_validation_summary() {
 
         echo "100"
         echo "# Validation complete!"
+
+        echo "$summary" >> $LOGFILE
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Component Validation" \
                --gauge "Validating installed components..." 10 70 0
@@ -1362,6 +1528,7 @@ main() {
     
     # Check prerequisites
     check_root
+    check_kvm_support
     check_available_memory
 
     detect_os
