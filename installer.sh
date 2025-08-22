@@ -32,6 +32,7 @@ PACKAGE_MANAGER=""
 SELECTED_COMPONENTS=()
 ZONE_TYPE=""
 MYSQL_SERVICE=""
+MYSQL_CONF_DIR=""
 
 CS_VERSION=4.20
 INTERFACE=
@@ -85,8 +86,8 @@ check_root() {
     fi
 }
 
-check_available_memory() {
-    MIN_RAM_KB=$((5 * 1024 * 1024))  # 8 GB in KB
+check_system_resources() {
+    MIN_RAM_KB=$((8 * 1024 * 1024))  # 8 GB in KB
     TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 
     # Check if RAM is within the desired range
@@ -95,19 +96,29 @@ check_available_memory() {
     else
         error_exit "RAM check failed: System has $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB RAM"
     fi
+
+    MIN_DISK_GB=100  # Minimum disk space in GB
+    TOTAL_DISK_GB=$(df / | tail -1 | awk '{print $2}' | awk '{printf "%.0f", $1/1024/1024}')
+
+    # Check if disk space is within the desired range
+    if [ "$TOTAL_DISK_GB" -ge "$MIN_DISK_GB" ]; then
+        success_msg "Disk space check passed: $TOTAL_DISK_GB GB available"
+    else
+        error_exit "Disk space check failed: System has only $TOTAL_DISK_GB GB available"
+    fi
 }
 
 check_kvm_support() {
     info_msg "Checking KVM prerequisites..."
     if ! grep -E 'vmx|svm' /proc/cpuinfo >/dev/null; then
-        error_exit "CPU does not support hardware virtualization (KVM)"
+        error_exit "CPU does not support hardware virtualization (agent)"
     fi
-    success_msg "✓ CPU virtualization support detected$"
+    success_msg "✓ CPU virtualization support detected"
 
     if ! lsmod | grep -q kvm; then
         error_exit "KVM kernel module is not loaded"
     fi
-    success_msg "✓ KVM kernel module loaded$"
+    success_msg "✓ KVM kernel module loaded"
 }
 
 # Function to detect the OS type and pkg mgr
@@ -124,10 +135,12 @@ detect_os() {
         ubuntu|debian)
             PACKAGE_MANAGER="apt"
             MYSQL_SERVICE="mysql"
+            MYSQL_CONF_DIR="/etc/mysql/mysql.conf.d"
             ;;
-        rhel|centos|fedora|rocky|alma)
+        rhel|centos|ol|rocky|almalinux)
             PACKAGE_MANAGER="dnf"
             MYSQL_SERVICE="mysqld"
+            MYSQL_CONF_DIR="/etc/my.cnf.d"
             ;;
         *)
             echo "Unsupported OS: $OS_TYPE"
@@ -254,15 +267,17 @@ configure_cloudstack_repo() {
                        --programbox "Configuring CloudStack repository..." 15 70
             ;;
             
-        rhel|centos|fedora|rocky|alma)
+        rhel|centos|ol|rocky|almalinux)
         {
             echo "20"
             echo "# Adding CloudStack repository..."
             # Create repo file
+            local repo_path=$(determine_distro_version)
+            DISTRO_VERSION_URL=https://download.cloudstack.org/$repo_path/$CS_VERSION/
             if cat > /etc/yum.repos.d/cloudstack.repo <<EOF
 [cloudstack]
 name=CloudStack
-baseurl=https://download.cloudstack.org/centos/8/$CS_VERSION/
+baseurl=$DISTRO_VERSION_URL
 enabled=1
 gpgcheck=0
 gpgkey=https://download.cloudstack.org/release.asc
@@ -292,41 +307,60 @@ EOF
     esac
 }
 
+determine_distro_version() {
+    # Extract major version (8 or 9) from version string
+    local major_version=${OS_VERSION%%.*}
+    case "$OS_TYPE" in
+        centos)
+            echo "centos/$major_version"
+            ;;
+        rhel)
+            echo "rhel/$major_version"
+            ;;
+        rocky|almalinux|ol)
+            echo "el/$major_version"
+            ;;
+        *)
+            error_exit "Unsupported OS type: $OS_TYPE"
+            ;;
+    esac
+}
+
 install_base_dependencies() {
+    log "Installing dialog..."
     case "$PACKAGE_MANAGER" in
         apt)
+            apt-get update &>/dev/null || error_exit "Failed to update package lists"
             apt-get install -y dialog &>/dev/null || \
                 error_exit "Failed to install base dependencies"
             ;;
         dnf)
+            dnf makecache &>/dev/null || error_exit "Failed to update package cache"
             dnf install -y dialog  &>/dev/null || \
                 error_exit "Failed to install base dependencies"
             ;;
     esac
-    {
-        echo "10"
-        echo "# Updating package lists..."
-        case "$PACKAGE_MANAGER" in
-            apt)
-                apt-get update &>/dev/null || error_exit "Failed to update package lists"
-                ;;
-            dnf)
-                dnf makecache &>/dev/null || error_exit "Failed to update package cache"
-                ;;
-        esac
-        
+    {   
+        echo "XXX"
         echo "50"
-        echo "Installing base dependencies (dialog, python, whiptail, curl, etc.)..."
+        echo "Installing base dependencies (qemu-kvm, python, curl, etc.)..."
+        echo "XXX"
         case "$PACKAGE_MANAGER" in
             apt)
-                apt-get install -y apt-utils curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
+                apt-get install -y qemu-kvm apt-utils curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
                     error_exit "Failed to install base dependencies"
                 ;;
             dnf)
                 dnf install -y curl openssh-server sudo wget jq tar nmap &>/dev/null || \
                     error_exit "Failed to install base dependencies"
                 ;;
-        esac 
+        esac
+
+        echo "XXX"
+        echo "100"
+        echo "Base dependencies installed successfully"
+        echo "XXX"
+
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Installing Dependencies" \
                --gauge "Preparing system..." 10 70  
@@ -375,6 +409,7 @@ install_kvm_agent() {
 # Function to install MySQL Server
 install_mysql_server() {
     install_package "mysql-server"
+    systemctl start $MYSQL_SERVICE
 }
 
 # Function to install NFS Server
@@ -397,10 +432,10 @@ select_components() {
            --checklist "Select CloudStack components to install:" 15 70 6 \
            "management" "CloudStack Management Server" on \
            "usage" "CloudStack Usage Server" off \
-           "kvm" "KVM Agent" on \
+           "agent" "KVM Agent" on \
            "mysql" "MySQL Server" on \
            "nfs" "NFS Server" on \
-           "common" "CloudStack Common (required)" on \
+           "common" "CloudStack Common" on \
            2> "$temp_file"
     
     if [[ $? -ne 0 ]]; then
@@ -441,7 +476,7 @@ install_components() {
                 usage)
                     install_usage_server
                     ;;
-                kvm)
+                agent)
                     install_kvm_agent
                     ;;
                 mysql)
@@ -476,28 +511,14 @@ configure_mysql() {
     dialog --title "Error" --msgbox "MySQL is not installed. Please install MySQL first." 6 50
     return 1
   fi
-
-  local mysql_conf_dir
-  case "$PACKAGE_MANAGER" in
-    apt)
-        mysql_conf_dir="/etc/mysql/mysql.conf.d"
-        ;;
-    dnf)
-        mysql_conf_dir="/etc/my.cnf.d"
-        ;;
-    *)
-        dialog --title "Error" --msgbox "Unsupported package manager for MySQL configuration" 6 50
-        return 1
-        ;;
-  esac
   
-  local config_file="$mysql_conf_dir/cloudstack.cnf"
+  local config_file="$MYSQL_CONF_DIR/cloudstack.cnf"
   if [[ -f "$config_file" ]]; then
     dialog --title "MySQL Configuration" --msgbox "Configuration already exists at:\n$config_file\nSkipping MySQL setup." 8 60
     return
   fi
 
-  mkdir -p "$mysql_conf_dir"
+  mkdir -p "$MYSQL_CONF_DIR"
 
   dialog --yesno "Do you want to configure MySQL for CloudStack?" 7 50
   response=$?
@@ -507,10 +528,9 @@ configure_mysql() {
   fi
 
   # ensure mysql is running
-  if ! systemctl is-active --quiet mysql; then
-    dialog --msgbox "MySQL service is not running. Bringing it up..." 6 50
-    systemctl start $MYSQL_SERVICE
-    sleep 5
+  if ! systemctl is-active --quiet $MYSQL_SERVICE; then
+    dialog --title "MySQL Configuration" --msgbox "MySQL service is not running. Please start MySQL before proceeding." 6 50
+    return 1
   fi
 
   dialog --title "MySQL Configuration" --msgbox "Configuring MYSQL for CloudStack..." 6 50
@@ -564,7 +584,7 @@ configure_nfs_server() {
     systemctl restart nfs-kernel-server
     SERVICE_STATUS=$?
   
-  elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle|rocky)$ ]]; then
+  elif [[ "$OS_TYPE" =~ ^(rhel|centos|ol|rocky|almalinux)$ ]]; then
     # Set ports in /etc/sysconfig/nfs if needed
     cat <<EOF >> /etc/sysconfig/nfs
 MOUNTD_PORT=892
@@ -669,24 +689,29 @@ configure_kvm_agent() {
 
     # Configure VNC
     {
+        echo "XXX"
         echo "10"
         echo "# Configuring VNC access..."
+        echo "XXX"
         if sed -i -e 's/\#vnc_listen.*$/vnc_listen = "0.0.0.0"/g' /etc/libvirt/qemu.conf; then
             echo "VNC configuration successful"
         else
-            echo "Failed to configure VNC"
-            exit 1
+            error_exit "Failed to configure VNC"
         fi
 
+        echo "XXX"
         echo "25"
         echo "# Configuring libvirtd..."
+        echo "XXX"
         # Configure libvirtd to listen
         if ! grep '^LIBVIRTD_ARGS="--listen"' /etc/default/libvirtd > /dev/null; then
             echo 'LIBVIRTD_ARGS="--listen"' >> /etc/default/libvirtd
         fi
 
+        echo "XXX"
         echo "40"
         echo "# Setting up libvirt TCP access..."
+        echo "XXX"
         cat >> /etc/libvirt/libvirtd.conf <<EOF
 listen_tcp = 1
 listen_tls = 0
@@ -695,13 +720,17 @@ mdns_adv = 0
 auth_tcp = "none"
 EOF
 
+        echo "XXX"
         echo "60"
         echo "# Configuring libvirt sockets..."
+        echo "XXX"
         systemctl mask libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket libvirtd-tls.socket libvirtd-tcp.socket
         systemctl restart libvirtd
 
+        echo "XXX"
         echo "75"
         echo "# Configuring security policies..."
+        echo "XXX"
         case "$OS_TYPE" in
             ubuntu|debian)
                 echo "# Configuring AppArmor..."
@@ -735,14 +764,16 @@ EOF
                     echo "AppArmor not installed, skipping configuration"
                 fi
                 ;;
-            rhel|centos|rocky|oracle)
+            rhel|centos|ol|rocky|almalinux)
                 # SELinux configuration if needed
                 setsebool -P virt_use_nfs 1
                 ;;
         esac
 
+        echo "XXX"
         echo "85"
         echo "# Configuring firewall..."
+        echo "XXX"
         ports=(
             "22"           # SSH
             "1798"         # CloudStack Management Server
@@ -762,7 +793,7 @@ EOF
                     warn_msg "UFW not found, skipping firewall configuration"
                 fi
                 ;;
-            rhel|centos|rocky|oracle)
+            rhel|centos|ol|rocky|almalinux)
                 if command -v firewall-cmd >/dev/null; then
                     for port in "${ports[@]}"; do
                         firewall-cmd --permanent --add-port="$port"
@@ -772,7 +803,9 @@ EOF
                 ;;
         esac
 
+        echo "XXX"
         echo "100"
+        echo "XXX"
         echo "# KVM host configuration completed!"
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "KVM Host Configuration" \
@@ -1137,7 +1170,7 @@ configure_components() {
     fi
 
     # 4. Configure KVM Agent (if selected)
-    if is_component_selected "kvm"; then
+    if is_component_selected "agent"; then
         if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
             dialog --backtitle "$SCRIPT_NAME" \
                    --title "Error" \
@@ -1184,7 +1217,7 @@ configure_components() {
                 [[ " ${SELECTED_COMPONENTS[@]} " =~ " mysql " ]] && echo "✓ MySQL Server\n"
                 [[ " ${SELECTED_COMPONENTS[@]} " =~ " nfs " ]] && echo "✓ NFS Server\n"
                 [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]] && echo "✓ Management Server\n"
-                [[ " ${SELECTED_COMPONENTS[@]} " =~ " kvm " ]] && echo "✓ KVM Agent\n"
+                [[ " ${SELECTED_COMPONENTS[@]} " =~ " agent " ]] && echo "✓ KVM Agent\n"
                 [[ " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]] && echo "✓ Usage Server\n"
            )" 15 60
 }
@@ -1273,7 +1306,7 @@ EOF
             error_exit "Failed to apply Netplan configuration"
         fi
 
-    elif [[ "$OS_TYPE" =~ ^(rhel|centos|fedora|ol|oracle|rocky)$ ]]; then
+    elif [[ "$OS_TYPE" =~ ^(rhel|centos|ol|rocky|almalinux)$ ]]; then
         {
             echo "10"
             echo "# Configuring bridge interface $BRIDGE..."
@@ -1409,7 +1442,7 @@ show_validation_summary() {
             echo "30"
             echo "# Checking MySQL..."
             if systemctl is-active --quiet $MYSQL_SERVICE; then
-                if [[ -f "/etc/mysql/mysql.conf.d/cloudstack.cnf" ]]; then
+                if [[ -f "$MYSQL_CONF_DIR/cloudstack.cnf" ]]; then
                     summary+="✓ MySQL: Running and configured\n"
                 else
                     summary+="✗ MySQL: Running but missing CloudStack configuration\n"
@@ -1456,7 +1489,7 @@ show_validation_summary() {
         fi
 
         # 5. KVM Agent Validation (if selected)
-        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " kvm " ]]; then
+        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " agent " ]]; then
             echo "85"
             echo "# Checking KVM Agent..."
             if systemctl is-active --quiet libvirtd; then
@@ -1493,11 +1526,12 @@ show_validation_summary() {
         echo "100"
         echo "# Validation complete!"
 
-        echo "$summary" >> $LOGFILE
+        echo "Within $summary" >> $LOGFILE
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Component Validation" \
                --gauge "Validating installed components..." 10 70 0
-
+    
+    echo "$summary" >> $LOGFILE
     # Show validation results with colors
     if $status_ok; then
         dialog --backtitle "$SCRIPT_NAME" \
@@ -1529,7 +1563,7 @@ main() {
     # Check prerequisites
     check_root
     check_kvm_support
-    check_available_memory
+    check_system_resources
 
     detect_os
     install_base_dependencies
