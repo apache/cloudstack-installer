@@ -1003,6 +1003,28 @@ deploy_zone() {
         cmk add traffictype traffictype=Management physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Guest physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Public physicalnetworkid="$phy_id"
+
+        echo "XXX"
+        echo "35"
+        echo "Adding IP Ranges..."
+        echo "XXX"
+
+        # Add Public IP Range
+        if ! cmk create vlaniprange \
+            zoneid="$zone_id" \
+            vlan=untagged \
+            gateway="$GATEWAY" \
+            netmask="255.255.255.0" \
+            startip="${HOST_IP%.*}.11" \
+            endip="${HOST_IP%.*}.30" \
+            forvirtualnetwork=true; then
+            echo "XXX"
+            echo "100"
+            echo "Failed to add Public IP range"
+            echo "XXX"
+            return 1
+        fi
+        cmk update physicalnetwork id=$phy_id vlan=100-200
         
         echo "XXX"
         echo "40"
@@ -1025,8 +1047,8 @@ deploy_zone() {
             zoneid="$zone_id" \
             gateway="$GATEWAY" \
             netmask="255.255.255.0" \
-            startip="${HOST_IP%.*}.10" \
-            endip="${HOST_IP%.*}.20" | jq -r '.pod.id')
+            startip="${HOST_IP%.*}.31" \
+            endip="${HOST_IP%.*}.50" | jq -r '.pod.id')
         
         [[ -z "$pod_id" ]] && error_exit "Failed to create pod"
         
@@ -1241,11 +1263,6 @@ configure_cloud_init() {
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Cloud-init Configuration" \
                --gauge "Configuring cloud-init..." 8 60 0
-
-    # Confirm success
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Cloud-init Configuration" \
-           --msgbox "Successfully disabled cloud-init network configuration." 6 60
 }
 
 configure_network() {
