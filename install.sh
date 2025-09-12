@@ -72,7 +72,7 @@ warn "Work in progress, try again while this is being hacked"
 ### Setup Prerequisites ###
 info "Installing dependencies"
 apt-get update
-apt-get install -y openssh-server sudo wget jq htop tar nmap bridge-utils
+apt-get install -y gpg openssh-server sudo wget jq htop tar nmap bridge-utils
 
 # FIXME: check for host spec (min 4-8G RAM?) /dev/kvm and
 
@@ -84,7 +84,7 @@ setup_bridge() {
     return
   fi
 
-  interface=$(find /sys/class/net -type l -not -lname '*virtual*' -printf '%f\n' | sort | head -1)
+  interface=$(ip route get 8.8.8.8 | awk -F"dev " 'NR==1 {split($2,a," ");print a[1]}' | sort | head -1)
   gateway=$(ip route show 0.0.0.0/0 dev $interface | cut -d ' ' -f 3)
   hostipandsub=$(ip -4 -br addr show $interface | awk '{ print $3; }' )
   info "Setting up bridge on $interface which has IP $hostipandsub and gateway $gateway"
@@ -138,10 +138,14 @@ EOF
 
 configure_repo() {
   info "Configuring CloudStack $CS_VERSION repo"
+  NAME=$(sed -rn 's|^deb\s+\S+\s+(\w+)\s+main.*$|\1|p' /etc/apt/sources.list | head -n 1)
+
   mkdir -p /etc/apt/keyrings
+  wget -O - https://download.cloudstack.org/release.asc | sudo tee /etc/apt/trusted.gpg.d/cloudstack.asc
   wget -O- https://download.cloudstack.org/release.asc 2>/dev/null | gpg --dearmor | sudo tee /etc/apt/keyrings/cloudstack.gpg > /dev/null
   # NOTE: debian-based distro packages are now release agnostic
-  echo deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu noble $CS_VERSION > /etc/apt/sources.list.d/cloudstack.list
+  echo deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu $NAME $CS_VERSION > /etc/apt/sources.list.d/cloudstack.list
+  apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3D62B837F100E758 
   apt-get update
 }
 
