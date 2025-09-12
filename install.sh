@@ -72,7 +72,7 @@ warn "Work in progress, try again while this is being hacked"
 ### Setup Prerequisites ###
 info "Installing dependencies"
 apt-get update
-apt-get install -y gpg openssh-server sudo wget jq htop tar nmap bridge-utils
+apt-get install -y gpg apparmor openssh-server sudo wget jq htop tar nmap bridge-utils
 
 # FIXME: check for host spec (min 4-8G RAM?) /dev/kvm and
 
