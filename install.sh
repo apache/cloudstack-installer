@@ -116,7 +116,8 @@ EOF
 
   # FIX netplan complaining about permissions
   chmod 600 /etc/netplan/01-netcfg.yaml
-
+  # FIX "No such file or directory" error
+  mkdir /etc/cloud/ && mkdir /etc/cloud/cloud.cfg.d/ 
   info "Disabling cloud-init netplan config"
   rm -f /etc/netplan/50-cloud-init.yaml
   if [[ ! -f "/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg" && ! -f "/etc/cloud/cloud.cfg.d/99_disable-network-config.cfg" ]]; then
@@ -226,8 +227,8 @@ configure_host() {
     # Ubuntu: disable apparmor
     ln -sf /etc/apparmor.d/usr.sbin.libvirtd /etc/apparmor.d/disable/
     ln -sf /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper /etc/apparmor.d/disable/
-    apparmor_parser -R /etc/apparmor.d/usr.sbin.libvirtd
-    apparmor_parser -R /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper
+    apparmor_parser -R /etc/apparmor.d/usr.sbin.libvirtd --subdomainfs
+    apparmor_parser -R /etc/apparmor.d/usr.lib.libvirt.virt-aa-helper --subdomainfs
   fi
 
   if ! kvm-ok; then
