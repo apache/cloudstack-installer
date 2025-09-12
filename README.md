@@ -8,13 +8,13 @@ NOTE: Work in progress
 To install and deploy [CloudStack](https://cloudstack.apache.org), just copy and run the following as `root` user:
 
 ```bash
-curl -sL https://github.com/Bitsonwheels/cloudstack-installer/blob/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/Bitsonwheels/cloudstack-installer/refs/heads/main/install.sh | bash
 ```
 
 Here's how you should really run it though:
 
 ```bash
-curl -o install.sh https://github.com/Bitsonwheels/cloudstack-installer/blob/main/install.sh
+curl -o install.sh https://raw.githubusercontent.com/Bitsonwheels/cloudstack-installer/refs/heads/main/install.sh
 cat install.sh | more # to read it
 bash -x install.sh # to also see what it's doing
 ```
