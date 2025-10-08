@@ -97,7 +97,7 @@ check_system_resources() {
         error_exit "RAM check failed: System has $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB RAM"
     fi
 
-    MIN_DISK_GB=100  # Minimum disk space in GB
+    MIN_DISK_GB=75  # Minimum disk space in GB
     TOTAL_DISK_GB=$(df / | tail -1 | awk '{print $2}' | awk '{printf "%.0f", $1/1024/1024}')
 
     # Check if disk space is within the desired range
@@ -235,6 +235,10 @@ update_system() {
 }
 
 configure_cloudstack_repo() {
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "CloudStack Repository Configuration" \
+           --msgbox "This step will configure the Apache CloudStack repository for version $CS_VERSION.\n\nThe repository URL is:\nhttps://download.cloudstack.org/\n\nPress OK to proceed." 12 60
+
     case "$OS_TYPE" in
         ubuntu|debian)
             {
@@ -249,16 +253,14 @@ configure_cloudstack_repo() {
                 if curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/cloudstack.gpg > /dev/null; then
                     echo "CloudStack signing key added successfully."
                 else
-                    echo "ERROR: Failed to add CloudStack signing key."
-                    exit 1
+                    error_exit "Failed to add CloudStack signing key."
                 fi
                 
                 echo "Adding CloudStack repository..."
                 if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu $UBUNTU_CODENAME $CS_VERSION" | sudo tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
                     echo "CloudStack repository added successfully."
                 else
-                    echo "ERROR: Failed to add CloudStack repository."
-                    exit 1
+                    error_exit "Failed to add CloudStack repository."
                 fi
 
                 echo "Repository configuration completed."
@@ -271,7 +273,6 @@ configure_cloudstack_repo() {
         {
             echo "20"
             echo "# Adding CloudStack repository..."
-            # Create repo file
             local repo_path=$(determine_distro_version)
             DISTRO_VERSION_URL=https://download.cloudstack.org/$repo_path/$CS_VERSION/
             if cat > /etc/yum.repos.d/cloudstack.repo <<EOF
@@ -283,14 +284,12 @@ gpgcheck=0
 gpgkey=https://download.cloudstack.org/release.asc
 EOF
             then
+                echo "XXX"
                 echo "60"
                 echo "# Repository added successfully"
+                echo "XXX"
             else
-                echo "XXX"
-                echo "100"
-                echo "# Failed to create repository file"
-                echo "XXX"
-                exit 1
+                error_exit "Failed to create CloudStack repository file"
             fi
 
             echo "100"
@@ -326,36 +325,68 @@ determine_distro_version() {
     esac
 }
 
-install_base_dependencies() {
-    log "Installing dialog..."
+preinstall_dialog() {
+    log "Updating package list..."
     case "$PACKAGE_MANAGER" in
         apt)
-            apt-get update &>/dev/null || error_exit "Failed to update package lists"
-            apt-get install -y dialog &>/dev/null || \
-                error_exit "Failed to install base dependencies"
+            apt-get update || error_exit "Failed to update package lists"
             ;;
         dnf)
-            dnf makecache &>/dev/null || error_exit "Failed to update package cache"
-            dnf install -y dialog  &>/dev/null || \
-                error_exit "Failed to install base dependencies"
+            dnf makecache || error_exit "Failed to update package cache"
             ;;
     esac
+
+    log "Installing 'dialog'..."
+    case "$PACKAGE_MANAGER" in
+        apt)
+            apt-get install -y dialog || error_exit "Failed to install dialog"
+            ;;
+        dnf)
+            dnf install -y dialog || error_exit "Failed to install dialog"
+            ;;
+    esac
+}
+
+strip_ansi() {
+    sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g'
+}
+
+install_base_dependencies() {
+    if ! command -v dialog &>/dev/null; then
+        preinstall_dialog
+    fi
+    
+    TMP_LOG=$(mktemp /tmp/install_base.XXXXXX.log)
     {   
         echo "XXX"
-        echo "50"
+        echo "30"
         echo "Installing base dependencies (qemu-kvm, python, curl, etc.)..."
         echo "XXX"
+
         case "$PACKAGE_MANAGER" in
             apt)
-                apt-get install -y qemu-kvm apt-utils curl openssh-server sudo wget jq htop tar nmap bridge-utils &>/dev/null || \
-                    error_exit "Failed to install base dependencies"
+                DEBIAN_FRONTEND=noninteractive \
+                apt-get install -y qemu-kvm apt-utils curl openssh-server sshpass sudo wget jq htop tar nmap bridge-utils >> "$TMP_LOG" 2>&1 &
                 ;;
             dnf)
-                dnf install -y curl openssh-server sudo wget jq tar nmap &>/dev/null || \
+                dnf install -y curl openssh-server sshpass sudo wget jq tar nmap >> "$TMP_LOG" 2>&1 &
                     error_exit "Failed to install base dependencies"
                 ;;
         esac
 
+        INSTALL_PID=$!
+        PERCENT=31
+        while kill -0 "$INSTALL_PID" 2>/dev/null; do
+            echo "XXX"
+            echo "$PERCENT"
+            tail -n 3 "$TMP_LOG" | strip_ansi | tr -d '\n' | cut -c -200
+            echo "XXX"
+            PERCENT=$((PERCENT + 1))
+            [ "$PERCENT" -ge 98 ] && PERCENT=98
+            sleep 1
+        done
+
+        wait "$INSTALL_PID" || error_exit "Base dependency installation failed"
         echo "XXX"
         echo "100"
         echo "Base dependencies installed successfully"
@@ -363,11 +394,18 @@ install_base_dependencies() {
 
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Installing Dependencies" \
-               --gauge "Preparing system..." 10 70  
+               --gauge "Preparing system..." 15 70 0 
     
     dialog --backtitle "$SCRIPT_NAME" \
                --title "Installing Dependencies" \
-               --msgbox "Base dependencies installed successfully" 10 60
+               --msgbox "All Base dependencies installed successfully" 10 60
+    
+    if [ -s "$TMP_LOG" ]; then
+        if dialog --yesno "Would you like to view the installation log?" 8 60; then
+            dialog --textbox "$TMP_LOG" 20 80
+        fi
+        rm -f "$TMP_LOG"
+    fi
 }
 
 # Function to install packages based on the detected OS
@@ -375,19 +413,14 @@ install_package() {
     local package_name=$1
     case "$PACKAGE_MANAGER" in
         apt)
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package_name" &>/dev/null
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package_name"
             return $?
             ;;
         dnf)
-            dnf install -y "$package_name" &>/dev/null
+            dnf install -y "$package_name" >> "$log_file"
             return $?
             ;;
     esac
-}
-
-# Install common packages
-install_common_packages() {
-    install_package "cloudstack-common"
 }
 
 # Function to install CloudStack Management Server
@@ -435,7 +468,6 @@ select_components() {
            "agent" "KVM Agent" on \
            "mysql" "MySQL Server" on \
            "nfs" "NFS Server" on \
-           "common" "CloudStack Common" on \
            2> "$temp_file"
     
     if [[ $? -ne 0 ]]; then
@@ -456,52 +488,68 @@ select_components() {
 
 
 install_components() {
+    TMP_LOG=$(mktemp /tmp/component_install.XXXXXX.log)
+
     local total_steps=${#SELECTED_COMPONENTS[@]}
     local current_step=0
 
     {
         for component in "${SELECTED_COMPONENTS[@]}"; do
             current_step=$((current_step + 1))
-            local progress=$((current_step * 100 / total_steps))
-            
+            # Per-component progress range
+            local start_progress=$(((current_step - 1) * 100 / total_steps))
+            local end_progress=$((current_step * 100 / total_steps))
+            local percent_step=$start_progress
+
+            : > "$TMP_LOG"
+            local status_msg="[$current_step/$total_steps] Installing $component...\n\n"
+
             echo "XXX"
-            echo "$progress"
-            echo "Installing $component..."
+            echo "$start_progress"
+            echo "$status_msg"
             echo "XXX"
             
             case "$component" in
-                management)
-                    install_management_server
-                    ;;
-                usage)
-                    install_usage_server
-                    ;;
-                agent)
-                    install_kvm_agent
+                nfs)
+                    install_nfs_server >> "$TMP_LOG" 2>&1 &
                     ;;
                 mysql)
-                    install_mysql_server
+                    install_mysql_server >> "$TMP_LOG" 2>&1 &
                     ;;
-                nfs)
-                    install_nfs_server
+                management)
+                    install_management_server >> "$TMP_LOG" 2>&1 &
                     ;;
-                common)
-                    install_common_packages
+                agent)
+                    install_kvm_agent >> "$TMP_LOG" 2>&1 &
+                    ;;
+                usage)
+                    install_usage_server >> "$TMP_LOG" 2>&1 &
                     ;;
             esac
-            
-            sleep 1
+
+            INSTALL_PID=$!
+            # Animate the progress for this component
+            while kill -0 "$INSTALL_PID" 2>/dev/null; do
+                echo "XXX"
+                echo "$percent_step"
+                tail_output=$(tail -n 5 "$TMP_LOG" | strip_ansi | tr '\n' ' ' | cut -c -300)
+                echo "$status_msg $tail_output"
+                echo "XXX"
+                sleep 1
+                percent_step=$((percent_step + 1))
+                [ "$percent_step" -ge "$end_progress" ] && percent_step=$((end_progress - 1))
+            done
+
+            wait "$INSTALL_PID"
         done
 
-        # Show final 100% progress
         echo "XXX"
         echo "100"
         echo "All components installed successfully!"
         echo "XXX"
-        sleep 2
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Installing Components" \
-               --gauge "Starting installation..." 10 70 0
+               --gauge "Starting installation..." 15 70 0
 }
 
 configure_mysql() {
@@ -673,12 +721,6 @@ configure_management_server() {
 
     sleep 10
     echo "100" | dialog --title "Success" --msgbox "CloudStack Management Server has been configured." 7 60
-}
-
-
-
-configure_usage_server() {
-    echo "config usage server"
 }
 
 configure_kvm_agent() {
@@ -925,9 +967,23 @@ show_cloudstack_banner() {
 }
 
 deploy_zone() {
+    local input_bridge=$(dialog --backtitle "$SCRIPT_NAME" \
+        --title "Host Configuration" \
+        --inputbox "Enter the bridge interface name connected to public network (e.g., cloudbr0):" 8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
+    BRIDGE=${input_bridge:-$BRIDGE}
+
     HOST_IP=$(ip -4 addr show "$BRIDGE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
     GATEWAY=$(ip route | grep default | grep "$BRIDGE" | awk '{print $3}')
-    
+
+    local input_ip=$(dialog --backtitle "$SCRIPT_NAME" \
+        --title "Host Configuration" \
+        --inputbox "Detected Host IP: $HOST_IP\n\nYou can modify these values if needed." 10 60 "$HOST_IP" 3>&1 1>&2 2>&3)
+    local input_gw=$(dialog --backtitle "$SCRIPT_NAME" \
+        --title "Host Configuration" \
+        --inputbox "Detected Gateway: $GATEWAY\n\nYou can modify these values if needed." 10 60 "$GATEWAY" 3>&1 1>&2 2>&3)  
+    HOST_IP=${input_ip:-$HOST_IP}
+    GATEWAY=${input_gw:-$GATEWAY}  
+
     if [[ -z "$HOST_IP" || -z "$GATEWAY" ]]; then
         error_exit "Could not determine host IP or gateway. Is bridge $BRIDGE configured properly?"
     fi
@@ -939,11 +995,19 @@ deploy_zone() {
         --passwordbox "Enter root password for KVM host ($HOST_IP):" 8 60 \
         3>&1 1>&2 2>&3)
 
-    # Check if password was provided
-    if [[ -z "$root_pass" ]]; then
-        dialog --msgbox "Root password is required for host addition. Zone deployment cancelled." 8 60
-        return 1
-    fi
+    # check if password is provided and validate by doing ssh, reprompt until valid or cancelled
+    while [[ -n "$root_pass" ]]; do
+        if sshpass -p "$root_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@"$HOST_IP" 'echo "SSH connection successful"' &>/dev/null; then
+            break
+        else
+            root_pass=$(dialog --backtitle "$SCRIPT_NAME" \
+                --title "Host Configuration" \
+                --insecure \
+                --passwordbox "Failed to connect to $HOST_IP via SSH with the provided root password.\nPlease verify the password and ensure SSH access is enabled.\n\nRe-enter root password for KVM host ($HOST_IP):" 10 60 \
+                3>&1 1>&2 2>&3)
+        fi
+    done 
+    
 
     if ! wait_for_management_server; then
         dialog --backtitle "$SCRIPT_NAME" \
@@ -1208,23 +1272,6 @@ configure_components() {
         configure_kvm_agent
     fi
 
-    # 5. Configure Usage Server (if selected)
-    if is_component_selected "usage"; then
-        if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                   --title "Error" \
-                   --msgbox "Management Server must be running before configuring Usage Server" 6 60
-            return 1
-        fi
-        
-        current_step=$((current_step + 1))
-        update_progress "Configuring Usage Server..." $current_step | \
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Configuring Components" \
-               --gauge "" 10 70 0
-        configure_usage_server
-    fi
-
     # Show final progress
     update_progress "Configuration complete!" $total_steps | \
     dialog --backtitle "$SCRIPT_NAME" \
@@ -1396,6 +1443,8 @@ EOF
                 exit 1
             fi
 
+            sleep 5
+
             if output=$(nmcli connection up "$BRIDGE" 2>&1); then
                 echo "XXX"
                 echo "100"
@@ -1549,7 +1598,6 @@ show_validation_summary() {
                --gauge "Validating installed components..." 10 70 0
     
     echo "$summary" >> $LOGFILE
-    # Show validation results with colors
     if $status_ok; then
         dialog --backtitle "$SCRIPT_NAME" \
                --title "Validation Summary" \
@@ -1566,31 +1614,49 @@ show_validation_summary() {
 }
 
 configure_prerequisites() {
-    configure_network
     configure_cloudstack_repo
+    configure_network
     update_system
 }
 
-# Main function
-main() {
-    # Clear screen and start logging
-    clear
-    log "Starting CloudStack installation script"
-    
-    # Check prerequisites
+validate_setup_pre_req() {
     check_root
     check_kvm_support
     check_system_resources
-
     detect_os
     install_base_dependencies
-    configure_prerequisites
-    
-    # Welcome message
+}
+
+select_cloudstack_version() {
+    CS_VERSION="4.20"
+    TMP_LOG=$(mktemp /tmp/cs_version_input.XXXXXX)
     dialog --backtitle "$SCRIPT_NAME" \
            --title "Welcome" \
            --msgbox "Welcome to the Apache CloudStack Installation Script\!\n\nThis script will help you install and configure CloudStack components on your system.\n\nPress OK to continue." 12 60
     
+    # allow user to modify if he wants to change anything
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "CloudStack Version" \
+           --inputbox "Enter the CloudStack version to install:" 8 50 "$CS_VERSION" 2> $TMP_LOG
+    if [[ $? -ne 0 ]]; then
+        error_exit "CloudStack version input cancelled by user"
+    fi
+    CS_VERSION=$(< $TMP_LOG)
+    rm -f $TMP_LOG
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "CloudStack Version" \
+           --msgbox "You have selected CloudStack version: $CS_VERSION\n\nPress OK to continue." 8 50
+}
+
+
+custom_install() {
+    # Clear screen and start logging
+    clear
+    log "Starting CloudStack installation script"
+    select_cloudstack_version
+    
+    configure_prerequisites
+
     # Main installation flow
     select_components
     install_components
@@ -1614,6 +1680,60 @@ main() {
                 --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
     fi
     log "CloudStack installation script completed successfully"
+    exit 0
+}
+
+all_in_one_box() {
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "All-in-One Installation" \
+           --yesno "You have selected all components for installation. This will configure a complete CloudStack setup on this single machine.\n\nProceed with All-in-One installation?" 12 60
+    if [[ $? -ne 0 ]]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Cancelled" \
+               --msgbox "All-in-One installation cancelled by user." 6 60
+    fi
+    select_cloudstack_version
+
+    configure_prerequisites
+
+    SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent" "usage")
+    install_components
+    configure_components
+    show_validation_summary
+    deploy_zone
+    show_cloudstack_banner
+}
+
+main() {
+    validate_setup_pre_req
+    
+    local temp_file=$(mktemp)
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Installation Options" \
+           --menu "Select an option:" 15 60 4 \
+           1 "All-in-One Installation" \
+           2 "Custom Component Installation" \
+           3 "Configure CloudStack Repository" \
+           4 "Deploy CloudStack Zone" 2> "$temp_file"
+    if [[ $? -ne 0 ]]; then
+        error_exit "Installation option selection cancelled by user"
+    fi
+    local option=$(< "$temp_file")
+    case $option in
+        1)
+            all_in_one_box
+            ;;
+        2)
+            custom_install
+            ;;
+        3)
+            configure_cloudstack_repo
+            ;;
+        4)
+            deploy_zone
+            ;;
+    esac
+    rm -f "$temp_file"
     exit 0
 }
 
