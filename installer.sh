@@ -40,6 +40,7 @@ BRIDGE=cloudbr0
 HOST_IP=
 GATEWAY=
 DNS="8.8.8.8"
+NETMASK="255.255.255.0"
 
 # Colors for output
 RED='\033[0;31m'
@@ -418,10 +419,10 @@ install_base_dependencies() {
         case "$PACKAGE_MANAGER" in
             apt)
                 DEBIAN_FRONTEND=noninteractive \
-                apt-get install -y qemu-kvm apt-utils curl openssh-server sshpass sudo wget jq htop tar nmap bridge-utils >> "$TMP_LOG" 2>&1 &
+                apt-get install -y qemu-kvm apt-utils curl openntpd openssh-server sshpass sudo wget jq htop tar nmap bridge-utils util-linux >> "$TMP_LOG" 2>&1 &
                 ;;
             dnf)
-                dnf install -y curl openssh-server sshpass sudo wget jq tar nmap >> "$TMP_LOG" 2>&1 &
+                dnf install -y curl openssh-server chrony sshpass sudo wget jq tar nmap util-linux >> "$TMP_LOG" 2>&1 &
                 ;;
         esac
 
@@ -871,6 +872,10 @@ configure_kvm_agent() {
             echo 'LIBVIRTD_ARGS="--listen"' >> /etc/default/libvirtd
         fi
 
+        if ! grep -q '^remote_mode="legacy"' /etc/libvirt/libvirtd.conf; then
+            echo 'remote_mode="legacy"' >> /etc/libvirt/libvirtd.conf
+        fi
+
         echo "XXX"
         echo "40"
         echo "Setting up libvirt TCP access..."
@@ -891,7 +896,6 @@ EOF
             libvirtd-admin.socket \
             libvirtd-tls.socket \
             libvirtd-tcp.socket &>/dev/null
-        systemctl restart libvirtd
 
         echo "XXX"
         echo "75"
@@ -973,6 +977,28 @@ EOF
                 fi
                 ;;
         esac
+        systemctl restart libvirtd
+        sleep 2
+
+        echo "XXX"
+        echo "90"
+        echo "Update bridge in agent.properties!"
+        echo "XXX"
+        AGENT_PROPERTIES="/etc/cloudstack/agent/agent.properties"
+        if [ -f "$AGENT_PROPERTIES" ]; then
+            local agent_guid=$(uuidgen)
+            sed -i '/^guid=/d' "$AGENT_PROPERTIES"
+            sed -i '/^private\.network\.device=/d' "$AGENT_PROPERTIES"
+            {
+                echo "guid=$agent_guid"
+                echo "private.network.device=$BRIDGE"
+            } >> "$AGENT_PROPERTIES"
+        else
+            error_exit "Agent properties file not found at $AGENT_PROPERTIES"
+        fi
+    
+        systemctl restart cloudstack-agent
+        sleep 5
 
         echo "XXX"
         echo "100"
@@ -1166,9 +1192,12 @@ deploy_zone() {
                 --msgbox "Password cannot be empty. Please enter a valid password." 6 60
             continue
         fi
-
-        # Test SSH connection
-        if sshpass -p "$root_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@"$KVM_HOST_IP" "echo 2>&1"; then
+        
+        if sshpass -p "$root_pass" ssh -o StrictHostKeyChecking=no \
+                                        -o ConnectTimeout=5 \
+                                        -o LogLevel=ERROR \
+                                        -o UserKnownHostsFile=/dev/null \
+                                        -o root@"$KVM_HOST_IP" "echo 2>/dev/null"; then
             break
         else
             attempt=$((attempt + 1))
@@ -1220,8 +1249,11 @@ deploy_zone() {
         "Physical Network" "Physical Network 1"
         "Pod Name" "Pod1"
         "Cluster Name" "Cluster1"
-        "Primary Storage" "Primary1"
-        "Secondary Storage" "Secondary1"
+        "Primary Storage Name" "Primary1"
+        "Secondary Storage Name" "Secondary1"
+        "NFS Server IP" "$HOST_IP"
+        "Primary Storage Path" "/export/primary"
+        "Secondary Storage Path" "/export/secondary"
     )
 
     # Create form entries
@@ -1278,25 +1310,28 @@ deploy_zone() {
 
     # Map results to variables
     local zone_name="${results[0]}"
-    local network_type="${results[1]}"
-    local guest_cidr="${results[2]}"
-    local public_start="${results[3]}"
-    local public_end="${results[4]}"
-    local pod_start="${results[5]}"
-    local pod_end="${results[6]}"
-    local guest_start="${results[7]}"
-    local guest_end="${results[8]}"
-    local vlan_range="${results[9]}"
-    local phy_name="${results[10]}"
-    local pod_name="${results[11]}"
-    local cluster_name="${results[12]}"
-    local primary_name="${results[13]}"
-    local secondary_name="${results[14]}"
+    local guest_cidr="${results[1]}"
+    local public_start="${results[2]}"
+    local public_end="${results[3]}"
+    local pod_start="${results[4]}"
+    local pod_end="${results[5]}"
+    local guest_start="${results[6]}"
+    local guest_end="${results[7]}"
+    local vlan_range="${results[8]}"
+    local phy_name="${results[9]}"
+    local pod_name="${results[10]}"
+    local cluster_name="${results[11]}"
+    local primary_name="${results[12]}"
+    local secondary_name="${results[13]}"
+    local nfs_server="${results[14]}"
+    local primary_path="${results[15]}"
+    local secondary_path="${results[16]}"
+    local network_type="Advanced"
 
     # Show confirmation
     local confirm_msg="Please confirm the following configuration:\n\n"
     confirm_msg+="Zone: $zone_name (${network_type})\n"
-    confirm_msg+="Guest Network: $guest_cidr\n"
+    confirm_msg+="Guest CIDR: $guest_cidr\n"
     confirm_msg+="Public IPs: $public_start - $public_end\n"
     confirm_msg+="Pod IPs: $pod_start - $pod_end\n"
     confirm_msg+="Guest IPs: $guest_start - $guest_end\n"
@@ -1316,7 +1351,7 @@ deploy_zone() {
         echo "# Starting Zone deployment..."
 
         zone_output=$(cmk create zone name="${zone_name}" \
-            networktype=Advanced \
+            networktype="$network_type" \
             dns1="$DNS" \
             internaldns1="$DNS" \
             localstorageenabled=true \
@@ -1352,7 +1387,7 @@ deploy_zone() {
             zoneid="$zone_id" \
             vlan=untagged \
             gateway="$GATEWAY" \
-            netmask="255.255.255.0" \
+            netmask="$NETMASK" \
             startip="$public_start" \
             endip="$public_end" \
             forvirtualnetwork=true; then
@@ -1365,8 +1400,7 @@ deploy_zone() {
         cmk update physicalnetwork id=$phy_id vlan=$vlan_range
         
         echo "40"
-        echo "# Configuring Virtual Router..."
-        # Configure Virtual Router Provider
+        echo "Configuring Virtual Router..."
         cmk update physicalnetwork state=Enabled id="$phy_id"
         
         local nsp_id=$(cmk list networkserviceproviders name=VirtualRouter physicalnetworkid="$phy_id" | jq -r '.networkserviceprovider[0].id')
@@ -1382,7 +1416,7 @@ deploy_zone() {
         pod_id=$(cmk create pod name="$pod_name" \
             zoneid="$zone_id" \
             gateway="$GATEWAY" \
-            netmask="255.255.255.0" \
+            netmask="$NETMASK" \
             startip="$pod_start" \
             endip="$pod_end" | jq -r '.pod.id')
         
@@ -1423,7 +1457,7 @@ deploy_zone() {
             zoneid="$zone_id" \
             podid="$pod_id" \
             clusterid="$cluster_id" \
-            url="nfs://$HOST_IP/export/primary" \
+            url="nfs://$nfs_server$primary_path" \
             hypervisor=KVM \
             scope=zone
         
@@ -1434,7 +1468,7 @@ deploy_zone() {
         # Add Secondary Storage
         cmk add imagestore name="$secondary_name" \
             zoneid="$zone_id" \
-            url="nfs://$HOST_IP/export/secondary" \
+            url="nfs://$nfs_server$secondary_path" \
             provider=NFS
 
         echo "XXX"
