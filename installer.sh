@@ -399,7 +399,7 @@ preinstall_dialog() {
 }
 
 strip_ansi() {
-    sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g'
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g'
 }
 
 install_base_dependencies() {
@@ -820,10 +820,10 @@ configure_management_server() {
         echo "# Starting CloudStack database deployment..."
         cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i "$cloudbr0_ip" 2>&1 | \
             while IFS= read -r line; do
-                echo "$line"
+                msg=$(echo "$line" | strip_ansi)
                 echo "XXX"
                 echo "50"
-                echo "Deploying CloudStack Database...\n\n$line"
+                echo "Deploying CloudStack Database...\n\n$msg"
                 echo "XXX"
             done
     } | dialog --backtitle "$SCRIPT_NAME" \
@@ -834,10 +834,10 @@ configure_management_server() {
         echo "# Starting CloudStack Management Server setup..."
         cloudstack-setup-management 2>&1 | \
             while IFS= read -r line; do
-                echo "$line"
+                msg=$(echo "$line" | strip_ansi)
                 echo "XXX"
                 echo "75"
-                echo "Deploying Management Server...\n\n$line"
+                echo "Deploying Management Server...\n\n$msg"
                 echo "XXX"
             done
     } | dialog --backtitle "$SCRIPT_NAME" \
@@ -1031,6 +1031,10 @@ EOF
     fi
 }
 
+configure_usage_server() {
+    sleep 30
+}
+
 wait_for_management_server() {
     local timeout=300  # 5 minutes timeout
     local interval=10  # Check every 10 seconds
@@ -1193,11 +1197,11 @@ deploy_zone() {
             continue
         fi
         
-        if sshpass -p "$root_pass" ssh -o StrictHostKeyChecking=no \
+        if sshpass -p "$root_pass" ssh  -o StrictHostKeyChecking=no \
                                         -o ConnectTimeout=5 \
                                         -o LogLevel=ERROR \
                                         -o UserKnownHostsFile=/dev/null \
-                                        -o root@"$KVM_HOST_IP" "echo 2>/dev/null"; then
+                                        root@"$KVM_HOST_IP" "echo 2>/dev/null"; then
             break
         else
             attempt=$((attempt + 1))
@@ -1237,7 +1241,6 @@ deploy_zone() {
     # Default values
     local defaults=(
         "Zone Name" "Zone1"
-        "Network Type" "Advanced"
         "Guest CIDR" "172.16.1.0/24"
         "Public Start IP" "${public_ips[0]}"
         "Public End IP" "${public_ips[-1]}"
@@ -1584,6 +1587,22 @@ configure_components() {
                --title "Configuring Components" \
                --gauge "" 10 70 0
         configure_kvm_agent
+    fi
+
+    # 5. Configure Usage Server (if selected)
+    if is_component_selected "usage"; then
+        if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
+            dialog --backtitle "$SCRIPT_NAME" \
+                   --title "Error" \
+                   --msgbox "Management Server must be running before configuring Usage Server" 6 60
+            return 1
+        fi
+        current_step=$((current_step + 1))
+        update_progress "Configuring Usage Server..." $current_step | \
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Configuring Components" \
+                --gauge "" 10 70 0
+        configure_usage_server
     fi
 
     # Show final progress
@@ -1973,7 +1992,7 @@ all_in_one_box() {
 
     configure_prerequisites
 
-    SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent")
+    SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent", "usage")
     install_components
     configure_components
     show_validation_summary
