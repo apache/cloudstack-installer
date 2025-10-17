@@ -26,7 +26,7 @@ set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Global variables
 SCRIPT_NAME="CloudStack Installer"
-LOGFILE="/tmp/cloudstack_install.log"
+CS_LOGFILE="/tmp/cloudstack_install.log"
 OS_TYPE=""
 PACKAGE_MANAGER=""
 SELECTED_COMPONENTS=()
@@ -51,7 +51,7 @@ NC='\033[0m' # No Color
 
 # Logging function
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOGFILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$CS_LOGFILE"
 }
 
 # Error handling function
@@ -799,6 +799,17 @@ configure_management_server() {
         return
     fi
 
+    if [[ -f "/etc/cloudstack/management/db.properties" ]]; then
+        local current_db_host=$(grep "^cluster.node.IP" /etc/cloudstack/management/db.properties | cut -d= -f2)
+        dialog --title "Info" \
+               --yesno "CloudStack database appears to be already configured.\nCurrent database host: $current_db_host\n\nDo you want to reconfigure it?" 10 60
+        if [[ $? -ne 0 ]]; then
+            dialog --title "Info" \
+                   --msgbox "Skipping database configuration." 6 50
+            return 0
+        fi
+    fi
+
     # Prompt for bridge interface
     BRIDGE=$(dialog --inputbox "Enter the bridge interface name:" 8 50 "$BRIDGE" 3>&1 1>&2 2>&3)
 
@@ -947,7 +958,7 @@ EOF
 
         echo "XXX"
         echo "85"
-        echo "# Configuring firewall..."
+        echo "Configuring firewall..."
         echo "XXX"
         ports=(
             "22"           # SSH
@@ -982,7 +993,7 @@ EOF
 
         echo "XXX"
         echo "90"
-        echo "Update bridge in agent.properties!"
+        echo "Update agent.properties!"
         echo "XXX"
         AGENT_PROPERTIES="/etc/cloudstack/agent/agent.properties"
         if [ -f "$AGENT_PROPERTIES" ]; then
@@ -1032,7 +1043,7 @@ EOF
 }
 
 configure_usage_server() {
-    sleep 30
+    sleep 5
 }
 
 wait_for_management_server() {
@@ -1575,14 +1586,14 @@ configure_components() {
         
         current_step=$((current_step + 1))
         if ! dialog --backtitle "$SCRIPT_NAME" \
-                   --title "KVM Agent Configuration" \
-                   --yesno "KVM Agent configuration will modify libvirt and network settings on this host.\n\nDo you want to proceed?" 10 60; then
+                   --title "Configure KVM Agent" \
+                   --yesno "Configure KVM Host Agent.\n\nDo you want to proceed?" 10 60; then
             dialog --backtitle "$SCRIPT_NAME" \
                    --title "Skipped" \
-                   --msgbox "KVM Agent configuration skipped." 6 50
+                   --msgbox "KVM Host Agent configuration skipped." 6 50
             return 1
         fi
-        update_progress "Configuring KVM Agent..." $current_step | \
+        update_progress "Configure KVM Agent..." $current_step | \
         dialog --backtitle "$SCRIPT_NAME" \
                --title "Configuring Components" \
                --gauge "" 10 70 0
@@ -1914,7 +1925,7 @@ show_validation_summary() {
     fi
 
     # Log the result
-    echo -e "Validation Summary:\n$summary" >> "$LOGFILE"
+    echo -e "Validation Summary:\n$summary" >> "$CS_LOGFILE"
 
     # Display final result in dialog
     if $status_ok; then
@@ -1955,29 +1966,6 @@ custom_install() {
     select_components
     install_components
     configure_components
-
-    show_validation_summary
-    validation_status=$?
-    if [[ $validation_status -ne 0 ]]; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Warning" \
-               --msgbox "Zone deployment is not available until all components are properly configured." 8 60
-    fi
-    
-    if [[  " ${SELECTED_COMPONENTS[@]} " =~ " management " ]]; then
-        if select_zone_deployment; then
-            deploy_zone
-        else
-            dialog --backtitle "$SCRIPT_NAME" \
-                    --title "Zone Deployment" \
-                    --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
-        fi
-    fi
-    # show dialog for script completion
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Installation Complete" \
-           --msgbox "CloudStack installation script has completed.\n\nCheck $LOGFILE for details." 8 60
-    exit 0
 }
 
 all_in_one_box() {
@@ -1992,12 +1980,9 @@ all_in_one_box() {
 
     configure_prerequisites
 
-    SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent", "usage")
+    SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent" "usage")
     install_components
     configure_components
-    show_validation_summary
-    deploy_zone
-    show_cloudstack_banner
 }
 
 main() {
@@ -2010,8 +1995,7 @@ main() {
            1 "All-in-One Installation" \
            2 "Custom Component Installation" \
            3 "Configure CloudStack Repository" \
-           4 "Configure Network" \
-           5 "Deploy CloudStack Zone" 2> "$temp_file"
+           4 "Deploy CloudStack Zone" 2> "$temp_file"
     if [[ $? -ne 0 ]]; then
         error_exit "Installation option selection cancelled by user"
     fi
@@ -2027,25 +2011,49 @@ main() {
             configure_cloudstack_repo
             ;;
         4)
-            configure_network
-            ;;
-        5)
             deploy_zone
             ;;
     esac
-    rm -f "$temp_file"
+
+    if show_validation_summary; then
+        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]]; then
+            if select_zone_deployment; then
+                deploy_zone
+            else
+                dialog --backtitle "$SCRIPT_NAME" \
+                        --title "Zone Deployment" \
+                        --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
+            fi
+        fi
+    else
+        dialog --backtitle "$SCRIPT_NAME" \
+            --title "Warning" \
+            --msgbox "Zone deployment is not available until all components are properly configured." 8 60
+    fi
+
+    # show dialog for script completion
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Installation Complete" \
+           --msgbox "CloudStack installation script has completed.\n\nCheck $CS_LOGFILE for details." 8 60
     exit 0
+    rm -f "$temp_file"
+    cleanup 0 
 }
 
 # Cleanup function for trap
 cleanup() {
+    local exit_code=$1
     clear
-    warn_msg "Script interrupted. Check $LOGFILE for details."
-    exit 1
+    if [[ $exit_code -eq 0 ]]; then
+        success_msg "Script completed successfully. Check $CS_LOGFILE for details."
+    else
+        warn_msg "Script interrupted. Check $CS_LOGFILE for details."
+    fi
+    exit $exit_code
 }
 
 # Set trap for cleanup
-trap cleanup INT TERM
+trap 'cleanup 1' INT TERM
 
 # Run main function
 main "$@"
