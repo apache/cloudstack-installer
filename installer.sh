@@ -26,7 +26,10 @@ set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Global variables
 SCRIPT_NAME="CloudStack Installer"
-CS_LOGFILE="/tmp/cloudstack_install.log"
+CS_LOGFILE="/tmp/cloudstack-install.log"
+EXECUTION_MODE=${EXECUTION_MODE:-PROMPT} # PROMPT or SILENT
+TRACKER_FILE="$HOME/cloudstack-installer-tracker.conf"
+
 OS_TYPE=""
 PACKAGE_MANAGER=""
 SELECTED_COMPONENTS=()
@@ -77,6 +80,89 @@ warn_msg() {
 info_msg() {
     echo -e "${BLUE}INFO: $1${NC}"
     log "INFO: $1"
+}
+
+
+declare -A tracker_values
+
+load_tracker() {
+    if [[ ! -f "$TRACKER_FILE" ]]; then
+        echo "# CloudStack Installer Tracker Config" > "$TRACKER_FILE"
+        echo "# Created on: $(date)" >> "$TRACKER_FILE"
+        return 0
+    fi
+
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" =~ ^# ]] && continue
+        tracker_values["$key"]="$value"
+    done < "$TRACKER_FILE"
+}
+
+get_tracker_field() {
+    local key="$1"
+    echo "${tracker_values[$key]:-}"
+}
+
+is_configured() {
+    local key="$1"
+    [[ -n "${tracker_values[$key]:-}" ]]
+}
+
+# Save or update a field in the tracker file
+set_tracker_field() {
+    local key="$1"
+    local value="$2"
+
+    # Update associative array
+    tracker_values["$key"]="$value"
+
+    # Update or append key=value in tracker file
+    if grep -q "^$key=" "$TRACKER_FILE"; then
+        sed -i.bak "s|^$key=.*|$key=$value|" "$TRACKER_FILE"
+    else
+        echo "$key=$value" >> "$TRACKER_FILE"
+    fi
+}
+
+# Utility: check if key is configured, show info/msg/confirm based on mode
+check_already_configured() {
+    local key="$1"
+    local title="$2"
+    local mode="${3:-info}"
+
+    if is_configured "$key"; then
+        local value="${tracker_values[$key]}"
+
+        case "$mode" in
+            info)
+                dialog --backtitle "$SCRIPT_NAME" \
+                       --title "$title" \
+                       --infobox "$key is already configured:\n\n$value" 7 60
+                sleep 3
+                return 0
+                ;;
+            msg)
+                dialog --backtitle "$SCRIPT_NAME" \
+                       --title "$title" \
+                       --msgbox "$key is already configured:\n\n$value" 8 60
+                return 0
+                ;;
+            confirm)
+                dialog --backtitle "$SCRIPT_NAME" \
+                       --title "$title" \
+                       --yesno "$key is already configured:\n\n$value\n\nDo you want to reconfigure it?" 10 60
+                if [[ $? -ne 0 ]]; then
+                    return 0  # skip reconfiguration
+                fi
+                return 1  # proceed with reconfiguration
+                ;;
+            *)
+                echo "Unknown mode: $mode"
+                return 1
+                ;;
+        esac
+    fi
+    return 1  # not configured yet, proceed
 }
 
 
@@ -131,6 +217,7 @@ detect_os() {
     source /etc/os-release
     OS_TYPE=$ID
     OS_VERSION=$VERSION_ID
+    VERSION_CODENAME=${VERSION_CODENAME:-}
     
     case "$OS_TYPE" in
         ubuntu|debian)
@@ -223,9 +310,7 @@ update_system() {
 
     # Verify update success
     if [[ $? -eq 0 ]]; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Success" \
-               --msgbox "System packages have been successfully updated." 6 50
+        show_dialog info "System Update" "System packages have been successfully updated." 2
     else
         dialog --backtitle "$SCRIPT_NAME" \
                --title "Error" \
@@ -235,93 +320,116 @@ update_system() {
 }
 
 configure_cloudstack_repo() {
-    local existing_version=""
-    local current_version="$CS_VERSION"
+    local repo_file=""
+    local repo_complete_path=""
     case "$OS_TYPE" in
         ubuntu|debian)
             repo_file="/etc/apt/sources.list.d/cloudstack.list"
-            if [[ -f "$repo_file" ]]; then
-                existing_version=$(grep -oP 'cloudstack.org/ubuntu\s+\w+\s+\K[\d.]+' "$repo_file")
-            fi
             ;;
         rhel|centos|ol|rocky|almalinux)
             repo_file="/etc/yum.repos.d/cloudstack.repo"
-            if [[ -f "$repo_file" ]]; then
-                existing_version=$(grep -oP 'cloudstack.org/.*/\K[\d.]+' "$repo_file")
-            fi
             ;;
         *)
             dialog --msgbox "Unsupported OS: $OS_TYPE" 6 50
             exit 1
             ;;
     esac
-    if [[ -n "$existing_version" ]]; then
-        if ! dialog --backtitle "$SCRIPT_NAME" \
-               --title "CloudStack Repository Configuration" \
-               --yesno "CloudStack repository for version $existing_version already exists.\nDo you want to change it?" 8 60; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                   --title "CloudStack Repository Configuration" \
-                   --msgbox "Update of repository version is skipped. CloudStack version: $existing_version is configured" 6 50
-            CS_VERSION="$existing_version"
-            return 0
-        fi
-        current_version="$existing_version"
-    fi
-
-    CS_VERSION=$(dialog --backtitle "$SCRIPT_NAME" \
-           --title "CloudStack Repository Configuration" \
-           --inputbox "Enter the CloudStack version to setup Apache CloudStack repository:\n\n(Default: $current_version)\n\nRepository URL:\nhttps://download.cloudstack.org/" \
-           15 60 "$current_version" \
-           3>&1 1>&2 2>&3)
-    
-    if [[ ! "$CS_VERSION" =~ ^4\.1[8-9]$|^4\.2[0-1]$ ]]; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Error" \
-               --msgbox "Unsupported CloudStack version: $CS_VERSION\nSupported versions are: 4.18, 4.19, 4.20, 4.21" 8 60
-        error_exit "Unsupported CloudStack version"
-    fi
-
-    if [[ "$CS_VERSION" == "$existing_version" ]]; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "CloudStack Repository Configuration" \
-               --msgbox "CloudStack repository version remains unchanged: $CS_VERSION" 6 50
+    if [[ -f "$repo_file" ]]; then
+        repo_complete_path=$(grep '^deb ' /etc/apt/sources.list.d/cloudstack.list | sed -E 's/^.*] //')
+        show_dialog \
+            "info" \
+            "CloudStack Repository Configuration" "CloudStack repository is configured already: \n\n$repo_complete_path"
+            set_tracker_field "repo_url" "$repo_complete_path"
         return 0
     fi
 
+    local default_base_url="https://download.cloudstack.org/"
+    local default_cs_version="4.20"
+    local repo_base_url cs_version
+    if [[ "$EXECUTION_MODE" == "PROMPT" ]]; then
+        local form_output
+        form_output=$(mktemp)
+        dialog --clear --form "Configure CloudStack Repository" 12 70 2 \
+            "Repo Base URL:" 1 1 "$default_base_url" 1 20 50 0 \
+            "Version:"       2 1 "$default_cs_version"    2 20 50 0 \
+            2> "$form_output"
+
+        mapfile -t lines < "$form_output"
+        repo_base_url="${lines[0]}"
+        cs_version="${lines[1]}"
+        rm -f "$form_output"
+        if [[ -z "$repo_base_url" || -z "$cs_version" ]]; then
+            show_dialog \
+                "info" \
+                "CloudStack Repo Configuration" \
+                "Error: Repository Base URL and Version cannot be empty."
+            error_exit "Invalid repository configuration"
+        fi
+        if [[ ! "$cs_version" =~ ^4\.1[8-9]$|^4\.2[0-1]$ ]]; then
+            dialog --backtitle "$SCRIPT_NAME" \
+                --title "Error" \
+                --msgbox "Unsupported CloudStack version: $cs_version\nSupported versions are: 4.18, 4.19, 4.20, 4.21" 8 60
+            error_exit "Unsupported CloudStack version provided in repository configuration"
+        fi
+    else
+        repo_base_url="$default_base_url"
+        cs_version="$default_cs_version"
+    fi
+
+    local base_url=$(echo "$repo_base_url" | sed -E 's#(https?://[^/]+)/.*#\1/#')
+    local gpg_url="${base_url}release.asc"
     case "$OS_TYPE" in
         ubuntu|debian)
-            _configure_deb_repo || exit 1
-            ;;
+            log "Configuring DEB repository for CloudStack version $cs_version from $repo_base_url"
+            if [[ "$OS_TYPE" == "debian" ]]; then
+                UBUNTU_CODENAME=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
+            else
+                UBUNTU_CODENAME="$VERSION_CODENAME"
+            fi
             
+            repo_complete_path="https://download.cloudstack.org/ubuntu $UBUNTU_CODENAME $cs_version"
+            if [[ "$repo_base_url" != *download.cloudstack.org* ]]; then
+                repo_complete_path="$repo_base_url/$cs_version /" 
+            fi
+            _configure_deb_repo "$gpg_url" "$repo_complete_path"
+            ;;
         rhel|centos|ol|rocky|almalinux)
-            _configure_rpm_repo || exit 1
+            local repo_path=$(determine_rpm_distro_version)
+            local repo_complete_path=$repo_base_url/$repo_path/$cs_version/
+            _configure_rpm_repo "$gpg_url" "$repo_complete_path"
             ;;
-            
         *)
             dialog --msgbox "Unsupported OS: $OS_TYPE" 6 50
             exit 1
             ;;
     esac
+    log "Final DEB repo path: $repo_complete_path"
+    set_tracker_field "repo_url" "$repo_complete_path"
 }
 
 _configure_deb_repo() {
+    local gpg_key_url="$1"
+    local repo_complete_path="$2"
+    dialog --backtitle "$SCRIPT_NAME" \
+           --title "Confirm Repository" \
+           --yesno "The following CloudStack repository will be added:\n\n$repo_complete_path\n\nProceed?" 12 70
+
+    if [[ $? -ne 0 ]]; then
+        error_exit "CloudStack repository configuration cancelled by user."
+    fi
+
     {
-        if [[ "$OS_TYPE" == "debian" ]]; then
-            UBUNTU_CODENAME=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
-        else
-            UBUNTU_CODENAME="$VERSION_CODENAME"
-        fi
         echo "Configuring CloudStack repository..."
         echo "Adding CloudStack's signing key..."
 
-        if curl -fsSL https://download.cloudstack.org/release.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/cloudstack.gpg > /dev/null; then
+        if curl -fsSL "$gpg_key_url" | gpg --dearmor | sudo tee /etc/apt/keyrings/cloudstack.gpg > /dev/null; then
             echo "CloudStack signing key added successfully."
         else
             error_exit "Failed to add CloudStack signing key."
         fi
         
         echo "Adding CloudStack repository..."
-        if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] https://download.cloudstack.org/ubuntu $UBUNTU_CODENAME $CS_VERSION" | sudo tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
+        if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] $repo_complete_path" | sudo tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
             echo "CloudStack repository added successfully."
         else
             error_exit "Failed to add CloudStack repository."
@@ -333,18 +441,19 @@ _configure_deb_repo() {
 
 
 _configure_rpm_repo () {
+    local gpg_key_url="$1"
+    local repo_base_url="$2"
     {
         echo "20"
         echo "# Adding CloudStack repository..."
-        local repo_path=$(determine_distro_version)
-        DISTRO_VERSION_URL=https://download.cloudstack.org/$repo_path/$CS_VERSION/
+        
         if cat > /etc/yum.repos.d/cloudstack.repo <<EOF
 [cloudstack]
 name=CloudStack
-baseurl=$DISTRO_VERSION_URL
+baseurl=$repo_complete_path
 enabled=1
 gpgcheck=0
-gpgkey=https://download.cloudstack.org/release.asc
+gpgkey=$repo_base_url/release.asc
 EOF
         then
             echo "# Repository added successfully"
@@ -354,10 +463,9 @@ EOF
     } | dialog --backtitle "$SCRIPT_NAME" \
             --title "Repository Configuration" \
             --programbox "Configuring CloudStack repository..." 15 70 0
-
 }
 
-determine_distro_version() {
+determine_rpm_distro_version() {
     # Extract major version (8 or 9) from version string
     local major_version=${OS_VERSION%%.*}
     case "$OS_TYPE" in
@@ -403,6 +511,7 @@ strip_ansi() {
 }
 
 install_base_dependencies() {
+    log "Starting base dependencies installation..."
     if ! command -v dialog &>/dev/null; then
         preinstall_dialog
     fi
@@ -448,10 +557,8 @@ install_base_dependencies() {
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Installing Dependencies" \
                --gauge "Preparing system..." 15 70 0 
-    
-    dialog --backtitle "$SCRIPT_NAME" \
-               --title "Installing Dependencies" \
-               --msgbox "All Base dependencies installed successfully" 10 60
+    show_dialog "info" "Dependencies Installation" "All Base dependencies installed successfully"
+    log "Base dependencies installed successfully"
     
     rm -f "$TMP_LOG"
 }
@@ -500,7 +607,7 @@ install_nfs_server() {
             apt-get install -y nfs-kernel-server nfs-common quota
             ;;
         dnf)
-            yum install -y nfs-utils quota
+            dnf install -y nfs-utils quota
             ;;
     esac
 }
@@ -810,8 +917,14 @@ configure_management_server() {
         fi
     fi
 
-    # Prompt for bridge interface
-    BRIDGE=$(dialog --inputbox "Enter the bridge interface name:" 8 50 "$BRIDGE" 3>&1 1>&2 2>&3)
+    if [ -z "$BRIDGE" ]; then
+        BRIDGE=$(dialog --inputbox "Enter the bridge interface name:" 8 50 "$BRIDGE" 3>&1 1>&2 2>&3)
+    fi
+
+    if [[ -z "$BRIDGE" ]]; then
+        dialog --title "Error" --msgbox "Bridge interface name cannot be empty.\nAborting." 7 50
+        return 1
+    fi
 
     # Get the bridge IP
     cloudbr0_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
@@ -855,8 +968,8 @@ configure_management_server() {
                --title "Management Server Setup" \
                --gauge "Starting management server setup..." 10 70 0
 
-    sleep 10
-    echo "100" | dialog --title "Success" --msgbox "CloudStack Management Server has been configured." 7 60
+    sleep 5
+    show_dialog "CloudStack Configuration" "CloudStack Management Server has been configured."
 }
 
 configure_kvm_agent() {
@@ -1162,10 +1275,13 @@ find_free_ip_range() {
 }
 
 deploy_zone() {
-    local input_bridge=$(dialog --backtitle "$SCRIPT_NAME" \
-        --title "Host Configuration" \
-        --inputbox "Enter the bridge interface name connected to public network:" 8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
-    BRIDGE=${input_bridge:-$BRIDGE}
+    log "Starting zone deployment..."
+    if [[ -z "$BRIDGE" ]]; then
+        BRIDGE=$(dialog --backtitle "$SCRIPT_NAME" \
+            --title "KVM Host Configuration" \
+            --inputbox "Enter the bridge interface name:" \
+            8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
+    fi
 
     HOST_IP=$(ip -4 addr show "$BRIDGE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
     GATEWAY=$(ip route | grep default | grep "$BRIDGE" | awk '{print $3}')
@@ -1656,9 +1772,44 @@ configure_cloud_init() {
                --gauge "Configuring cloud-init..." 8 60 0
 }
 
+show_dialog() {
+    local mode="$1"
+    local title="$2"
+    local msg="$3"
+    local seconds="${4:-3}"
+
+    case "$mode" in
+        info)
+            dialog --backtitle "$SCRIPT_NAME" \
+                    --title "$title" \
+                    --infobox "$msg" 7 60
+            sleep "$seconds"
+            return 0
+            ;;
+        msg)
+            dialog --backtitle "$SCRIPT_NAME" \
+                    --title "$title" \
+                    --msgbox "$msg" 8 60
+            return 0
+            ;;
+        confirm)
+            dialog --backtitle "$SCRIPT_NAME" \
+                    --title "$title" \
+                    --yesno "$msg" 10 60
+            if [[ $? -ne 0 ]]; then
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            echo "Unknown mode: $mode"
+            return 1
+            ;;
+    esac
+}
+
 configure_network() {
-    local new_bridge
-    new_bridge=$(dialog --inputbox "Enter the name for the bridge:" 8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
+    local new_bridge=$(dialog --inputbox "Enter the name for the bridge:" 8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
     if [[ -n "$new_bridge" && "$new_bridge" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]]; then
         BRIDGE="$new_bridge"
     fi
@@ -1666,9 +1817,9 @@ configure_network() {
     # First check if bridge already exists
     if ip link show "$BRIDGE" &>/dev/null; then
         local bridge_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Network Configuration" \
-               --msgbox "Bridge interface $BRIDGE already exists with IP $bridge_ip\nSkipping network configuration." 8 60
+        show_dialog \
+            "info" \
+            "Network Configuration" "Bridge interface $BRIDGE already exists with IP $bridge_ip\nSkipping network configuration."
         return 0
     fi
 
@@ -1816,9 +1967,10 @@ EOF
 
         # Verify the configuration
         if ip link show "$BRIDGE" &>/dev/null; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                --title "Success" \
-                --msgbox "Bridge $BRIDGE configured successfully with NetworkManager." 7 60
+            show_dialog \
+                "info" \
+                "Network Configuration" \
+                "Bridge $BRIDGE configured successfully with IP $(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)." 5
         else
             dialog --backtitle "$SCRIPT_NAME" \
                 --title "Error" \
@@ -1828,6 +1980,28 @@ EOF
     else
         error_exit "Unsupported OS type: $OS_TYPE"
     fi
+}
+
+setup_network() {
+    log "Starting network configuration"
+    if is_configured "network_name"; then
+        BRIDGE=$(get_tracker_field "network_name")
+        show_dialog "info" "Network Configuration" "Network already configured with bridge $BRIDGE\n\n Skipping network configuration."
+        return 0
+    fi
+    configure_network
+    set_tracker_field "network_name" "$BRIDGE"
+    log "Network configured with bridge $BRIDGE"
+}
+
+setup_repo() {
+    log "Setting up CloudStack repository"
+    if is_configured "repo_url"; then
+        local repo_url=$(get_tracker_field "repo_url")
+        show_dialog "info" "CloudStack Repo Setup" "CloudStack repository already configured with $repo_url\n\n Skipping repository setup."
+        return 0
+    fi
+    configure_cloudstack_repo
 }
 
 show_validation_summary() {
@@ -1945,8 +2119,8 @@ show_validation_summary() {
 
 
 configure_prerequisites() {
-    configure_cloudstack_repo
-    configure_network
+    setup_network
+    setup_repo
     update_system
 }
 
@@ -1961,8 +2135,6 @@ validate_setup_pre_req() {
 custom_install() {
     clear
     log "Starting CloudStack installation script"
-    
-    configure_prerequisites
     select_components
     install_components
     configure_components
@@ -1977,16 +2149,15 @@ all_in_one_box() {
                --title "Cancelled" \
                --msgbox "All-in-One installation cancelled by user." 6 60
     fi
-
-    configure_prerequisites
-
     SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent" "usage")
     install_components
     configure_components
 }
 
 main() {
+    load_tracker
     validate_setup_pre_req
+    configure_prerequisites
     
     local temp_file=$(mktemp)
     dialog --backtitle "$SCRIPT_NAME" \
@@ -1995,7 +2166,8 @@ main() {
            1 "All-in-One Installation" \
            2 "Custom Component Installation" \
            3 "Configure CloudStack Repository" \
-           4 "Deploy CloudStack Zone" 2> "$temp_file"
+           4 "Setup Network" \
+           5 "Deploy CloudStack Zone" 2> "$temp_file"
     if [[ $? -ne 0 ]]; then
         error_exit "Installation option selection cancelled by user"
     fi
@@ -2008,9 +2180,12 @@ main() {
             custom_install
             ;;
         3)
-            configure_cloudstack_repo
+            setup_repo
             ;;
         4)
+            setup_network
+            ;;
+        5)
             deploy_zone
             ;;
     esac
