@@ -282,9 +282,18 @@ update_system() {
     fi
 }
 
+normalize_repo_url_path() {
+    local url="$1"
+    # Remove duplicate slashes, then fix protocol
+    url=$(echo "$url" | sed 's#//*#/#g; s#https:/#https://#g; s#http:/#http://#g')
+    # Trim any trailing slash
+    url="${url%/}"
+    echo "$url"
+}
+
 configure_cloudstack_repo() {
     local repo_file=""
-    local repo_complete_path=""
+    local repo_entry=""
     case "$OS_TYPE" in
         ubuntu|debian)
             repo_file="/etc/apt/sources.list.d/cloudstack.list"
@@ -298,30 +307,30 @@ configure_cloudstack_repo() {
             ;;
     esac
     if [[ -f "$repo_file" ]]; then
-        repo_complete_path=$(grep '^deb ' /etc/apt/sources.list.d/cloudstack.list | sed -E 's/^.*] //')
+        repo_entry=$(grep '^deb ' /etc/apt/sources.list.d/cloudstack.list | sed -E 's/^.*] //')
         show_dialog \
             "info" \
-            "CloudStack Repository Configuration" "CloudStack repository is configured already: \n\n$repo_complete_path"
-            set_tracker_field "repo_url" "$repo_complete_path"
+            "CloudStack Repository Configuration" "CloudStack repository is configured already: \n\n$repo_entry"
+            set_tracker_field "repo_url" "$repo_entry"
         return 0
     fi
 
-    local default_base_url="https://download.cloudstack.org/"
+    local default_repo_url="https://download.cloudstack.org/"
     local default_cs_version="4.20"
-    local repo_base_url cs_version
+    local repo_url cs_version
     if is_interactive; then
         local form_output
         form_output=$(mktemp)
         dialog --clear --form "Configure CloudStack Repository" 12 70 2 \
-            "Repo Base URL:" 1 1 "$default_base_url" 1 20 50 0 \
+            "Repo Base URL:" 1 1 "$default_repo_url" 1 20 50 0 \
             "Version:"       2 1 "$default_cs_version"    2 20 50 0 \
             2> "$form_output"
 
         mapfile -t lines < "$form_output"
-        repo_base_url="${lines[0]}"
+        repo_url="${lines[0]}"
         cs_version="${lines[1]}"
         rm -f "$form_output"
-        if [[ -z "$repo_base_url" || -z "$cs_version" ]]; then
+        if [[ -z "$repo_url" || -z "$cs_version" ]]; then
             show_dialog \
                 "info" \
                 "CloudStack Repo Configuration" \
@@ -335,47 +344,50 @@ configure_cloudstack_repo() {
             error_exit "Unsupported CloudStack version provided in repository configuration"
         fi
     else
-        repo_base_url="$default_base_url"
+        repo_url="$default_repo_url"
         cs_version="$default_cs_version"
     fi
-
-    local base_url=$(echo "$repo_base_url" | sed -E 's#(https?://[^/]+)/.*#\1/#')
-    local gpg_url="${base_url}release.asc"
+    
+    repo_url="${repo_url%/}"  # Remove trailing slash if any
+    local repo_domain_url=$(echo "$repo_url" | sed -E 's#(https?://[^/]+)/.*#\1/#')
+    local gpg_url="${repo_domain_url}release.asc"
     case "$OS_TYPE" in
         ubuntu|debian)
-            log "Configuring DEB repository for CloudStack version $cs_version from $repo_base_url"
+            log "Configuring DEB repository for CloudStack version $cs_version from $repo_url"
             if [[ "$OS_TYPE" == "debian" ]]; then
                 UBUNTU_CODENAME=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
             else
                 UBUNTU_CODENAME="$VERSION_CODENAME"
             fi
-            
-            repo_complete_path="https://download.cloudstack.org/ubuntu $UBUNTU_CODENAME $cs_version"
-            if [[ "$repo_base_url" != *download.cloudstack.org* ]]; then
-                repo_complete_path="$repo_base_url/$cs_version /" 
+            if [[ "$repo_url" == *download.cloudstack.org* ]]; then
+                repo_url_entry=$(normalize_repo_url_path "$repo_url/ubuntu")
+                repo_entry="$repo_url_entry $UBUNTU_CODENAME $cs_version"
+            else
+                repo_url_entry=$(normalize_repo_url_path "$repo_url/$cs_version")
+                repo_entry="$repo_url_entry /"
             fi
-            _configure_deb_repo "$gpg_url" "$repo_complete_path"
+            _configure_deb_repo "$gpg_url" "$repo_entry"
             ;;
         rhel|centos|ol|rocky|almalinux)
             local repo_path=$(determine_rpm_distro_version)
-            local repo_complete_path=$repo_base_url/$repo_path/$cs_version/
-            _configure_rpm_repo "$gpg_url" "$repo_complete_path"
+            local repo_url_entry=$(normalize_repo_url_path "$repo_url/$repo_path/$cs_version/")
+            _configure_rpm_repo "$gpg_url" "$repo_url_entry"
             ;;
         *)
             dialog --msgbox "Unsupported OS: $OS_TYPE" 6 50
             exit 1
             ;;
     esac
-    log "Final DEB repo path: $repo_complete_path"
-    set_tracker_field "repo_url" "$repo_complete_path"
+    log "Final DEB repo path: $repo_entry"
+    set_tracker_field "repo_url" "$repo_entry"
 }
 
 _configure_deb_repo() {
     local gpg_key_url="$1"
-    local repo_complete_path="$2"
+    local repo_entry="$2"
     dialog --backtitle "$SCRIPT_NAME" \
            --title "Confirm Repository" \
-           --yesno "The following CloudStack repository will be added:\n\n$repo_complete_path\n\nProceed?" 12 70
+           --yesno "The following CloudStack repository will be added:\n\n$repo_entry\n\nProceed?" 12 70
 
     if [[ $? -ne 0 ]]; then
         error_exit "CloudStack repository configuration cancelled by user."
@@ -392,7 +404,7 @@ _configure_deb_repo() {
         fi
         
         echo "Adding CloudStack repository..."
-        if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] $repo_complete_path" | sudo tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
+        if echo "deb [signed-by=/etc/apt/keyrings/cloudstack.gpg] $repo_entry" | sudo tee /etc/apt/sources.list.d/cloudstack.list > /dev/null; then
             echo "CloudStack repository added successfully."
         else
             error_exit "Failed to add CloudStack repository."
@@ -405,7 +417,7 @@ _configure_deb_repo() {
 
 _configure_rpm_repo () {
     local gpg_key_url="$1"
-    local repo_base_url="$2"
+    local repo_entry="$2"
     {
         echo "20"
         echo "# Adding CloudStack repository..."
@@ -413,10 +425,10 @@ _configure_rpm_repo () {
         if cat > /etc/yum.repos.d/cloudstack.repo <<EOF
 [cloudstack]
 name=CloudStack
-baseurl=$repo_complete_path
+baseurl=$repo_entry
 enabled=1
 gpgcheck=0
-gpgkey=$repo_base_url/release.asc
+gpgkey=$gpg_key_url
 EOF
         then
             echo "# Repository added successfully"
@@ -1216,10 +1228,6 @@ EOF
     summary+="  - Libvirt (16509)\n"
     summary+="  - VNC (5900-6100)\n"
     summary+="  - Live Migration (49152-49216)\n"
-
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Configuration Complete" \
-           --msgbox "$summary" 15 60
     
     show_dialog "info" "$title" "$summary" 15 60
 
@@ -1808,7 +1816,7 @@ configure_network() {
 
     # Gather interface, IP, gateway
     interface=$(ip -o link show | awk -F': ' '/state UP/ && $2!~/^lo/ {print $2; exit}')
-    [[ -n "$interface" ]] || error "No active non-loopback interface found."
+    [[ -n "$interface" ]] || error_exit "No active non-loopback interface found."
 
     hostipandsub=$(ip -4 addr show dev "$interface" | awk '/inet / {print $2; exit}')
     gateway=$(ip route show default | awk '/default/ {print $3; exit}')
