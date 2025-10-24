@@ -873,12 +873,12 @@ configure_mysql_for_cloudstack() {
     cat > "$config_file" <<EOF
 [mysqld]
 server_id = 1
-sql_mode = "$sqlmode"
+sql_mode = $sqlmode
 innodb_rollback_on_timeout = 1
 innodb_lock_wait_timeout = 600
 max_connections = 1000
 log_bin = mysql-bin
-binlog_format = "ROW"
+binlog_format = ROW
 EOF
 
     systemctl restart $MYSQL_SERVICE && \
@@ -1090,13 +1090,26 @@ configure_kvm_agent() {
         echo "40"
         echo "Setting up libvirt TCP access..."
         echo "XXX"
-        cat >> /etc/libvirt/libvirtd.conf <<EOF
-listen_tcp = 1
-listen_tls = 0
-tcp_port = "16509"
-mdns_adv = 0
-auth_tcp = "none"
-EOF
+        LIBVIRT_CONF="/etc/libvirt/libvirtd.conf"
+        declare -A libvirt_settings=(
+            ["listen_tcp"]="1"
+            ["listen_tls"]="0"
+            ["tcp_port"]="\"16509\""
+            ["mdns_adv"]="0"
+            ["auth_tcp"]="\"none\""
+        )
+        touch "$LIBVIRT_CONF"
+
+        for key in "${!libvirt_settings[@]}"; do
+            # If key exists (commented or uncommented), replace it
+            if grep -Eq "^\s*#?\s*$key\s*=" "$LIBVIRT_CONF"; then
+                sed -i "s|^\s*#\?\s*$key\s*=.*|$key = ${libvirt_settings[$key]}|" "$LIBVIRT_CONF"
+            else
+                # Key doesn't exist, append to file
+                echo "$key = ${libvirt_settings[$key]}" >> "$LIBVIRT_CONF"
+            fi
+        done
+        
         echo "XXX"
         echo "60"
         echo "Configuring libvirt sockets..."
@@ -2167,16 +2180,18 @@ custom_install() {
 
 all_in_one_box() {
     PROMPT=0
-    dialog --backtitle "$SCRIPT_NAME" \
+    if dialog --backtitle "$SCRIPT_NAME" \
            --title "All-in-One Installation" \
-           --yesno "You have selected all components for installation. This will configure a complete CloudStack setup on this single machine.\n\nProceed with All-in-One installation?" 12 60
-    if [[ $? -ne 0 ]]; then
+           --yesno "You have selected all components for installation. This will configure a complete CloudStack setup on this single machine.\n\nProceed with All-in-One installation?" 12 60; then
+        SELECTED_COMPONENTS=("nfs" "management" "agent" "usage")
+        install_configure_components
+    else
         dialog --backtitle "$SCRIPT_NAME" \
-               --title "Cancelled" \
-               --msgbox "All-in-One installation cancelled by user." 6 60
+               --title "All-in-One Installation" \
+               --msgbox "Installation cancelled by user." 6 60
+        exit 0
     fi
-    SELECTED_COMPONENTS=("nfs" "management" "agent" "usage")
-    install_configure_components
+
 }
 
 main() {
