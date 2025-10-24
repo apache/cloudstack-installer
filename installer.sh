@@ -745,7 +745,6 @@ select_components() {
            "management" "CloudStack Management Server" on \
            "usage" "CloudStack Usage Server" off \
            "agent" "KVM Agent" on \
-           "mysql" "MySQL Server" on \
            "nfs" "NFS Server" on \
            2> "$temp_file"
     
@@ -769,12 +768,16 @@ show_components_versions() {
     local versions=()
     local component version_info
 
+    if [[ " ${SELECTED_COMPONENTS[*]} " =~ " management " ]] && [[ ! " ${SELECTED_COMPONENTS[*]} " =~ " mysql " ]]; then
+        SELECTED_COMPONENTS+=("mysql")
+    fi
+
     for component in "${SELECTED_COMPONENTS[@]}"; do
         case "$component" in
             nfs)
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy nfs-kernel-server 2>/dev/null | awk '/Candidate:/ {print $2}')
-                elif [[ "$PACKAGE_MANAGER" == "dnf" || "$PACKAGE_MANAGER" == "yum" ]]; then
+                elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
                     version_info=$($PACKAGE_MANAGER info nfs-utils 2>/dev/null | awk '/Version     :/ {print $3}')
                 fi
                 versions+=("NFS Server: ${version_info:-Not Available}\n")
@@ -792,7 +795,7 @@ show_components_versions() {
             management)
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy cloudstack-management 2>/dev/null | awk '/Candidate:/ {print $2}')
-                elif [[ "$PACKAGE_MANAGER" == "dnf" || "$PACKAGE_MANAGER" == "yum" ]]; then
+                elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
                     version_info=$($PACKAGE_MANAGER info cloudstack-management 2>/dev/null | awk '/Version     :/ {print $3}')
                 fi
                 versions+=("CloudStack Management Server: ${version_info:-Not Available}\n")
@@ -801,7 +804,7 @@ show_components_versions() {
             agent)
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy cloudstack-agent 2>/dev/null | awk '/Candidate:/ {print $2}')
-                elif [[ "$PACKAGE_MANAGER" == "dnf" || "$PACKAGE_MANAGER" == "yum" ]]; then
+                elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
                     version_info=$($PACKAGE_MANAGER info cloudstack-agent 2>/dev/null | awk '/Version     :/ {print $3}')
                 fi
                 versions+=("CloudStack KVM Agent: ${version_info:-Not Available}\n")
@@ -810,79 +813,14 @@ show_components_versions() {
             usage)
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy cloudstack-usage 2>/dev/null | awk '/Candidate:/ {print $2}')
-                elif [[ "$PACKAGE_MANAGER" == "dnf" || "$PACKAGE_MANAGER" == "yum" ]]; then
+                elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
                     version_info=$($PACKAGE_MANAGER info cloudstack-usage 2>/dev/null | awk '/Version     :/ {print $3}')
                 fi
-                versions+=("CloudStack Usage Server: ${version_info:-Not Available\n}")
+                versions+=("CloudStack Usage Server: ${version_info:-Not Available}\n")
                 ;;
         esac
     done
-
     show_dialog info "Component Versions" "Available versions from repository:\n\n$(printf '%s\n' "${versions[@]}")" 6 10 60
-}
-
-install_components() {
-    TMP_LOG=$(mktemp /tmp/component_install.XXXXXX.log)
-    local total_steps=${#SELECTED_COMPONENTS[@]}
-    local current_step=0
-    show_components_versions
-
-    {
-        for component in "${SELECTED_COMPONENTS[@]}"; do
-            current_step=$((current_step + 1))
-            local start_progress=$(((current_step - 1) * 100 / total_steps))
-            local end_progress=$((current_step * 100 / total_steps))
-            local percent_step=$start_progress
-
-            : > "$TMP_LOG"
-            local status_msg="[$current_step/$total_steps] Installing $component...\n\n"
-
-            echo "XXX"
-            echo "$start_progress"
-            echo "$status_msg"
-            echo "XXX"
-            
-            case "$component" in
-                nfs)
-                    install_nfs_server >> "$TMP_LOG" 2>&1 &
-                    ;;
-                mysql)
-                    install_mysql_server >> "$TMP_LOG" 2>&1 &
-                    ;;
-                management)
-                    install_management_server >> "$TMP_LOG" 2>&1 &
-                    ;;
-                agent)
-                    install_kvm_agent >> "$TMP_LOG" 2>&1 &
-                    ;;
-                usage)
-                    install_usage_server >> "$TMP_LOG" 2>&1 &
-                    ;;
-            esac
-
-            INSTALL_PID=$!
-            # Animate the progress for this component
-            while kill -0 "$INSTALL_PID" 2>/dev/null; do
-                echo "XXX"
-                echo "$percent_step"
-                tail_output=$(tail -n 5 "$TMP_LOG" | strip_ansi | tr '\n' ' ' | cut -c -300)
-                echo "$status_msg $tail_output"
-                echo "XXX"
-                sleep 1
-                percent_step=$((percent_step + 1))
-                [ "$percent_step" -ge "$end_progress" ] && percent_step=$((end_progress - 1))
-            done
-
-            wait "$INSTALL_PID"
-        done
-
-        echo "XXX"
-        echo "100"
-        echo "All components installed successfully!"
-        echo "XXX"
-    } | dialog --backtitle "$SCRIPT_NAME" \
-               --title "Installing Components" \
-               --gauge "Starting installation..." 15 70 0
 }
 
 configure_mysql_for_cloudstack() {
@@ -1037,39 +975,41 @@ setup_management_server_database() {
         return 0
     fi
     log "Starting CloudStack database deployment..."
+    if ! systemctl is-active $MYSQL_SERVICE > /dev/null; then
+         show_dialog "msg" "$title" "MySQL service is not running. Please start MySQL before proceeding." 
+        return 1
+    fi
+
+    local db_user="cloud"
+    local db_pass="cloud"
     if [[ -f "/etc/cloudstack/management/db.properties" ]]; then
-        local current_db_host=$(grep "^cluster.node.IP" /etc/cloudstack/management/db.properties | cut -d= -f2)
-        if ! dialog --title "Info" --yesno "CloudStack database appears to be already configured.\nCurrent database host: $current_db_host\n\nDo you want to reconfigure it?" 10 60; then
-            show_dialog "info" "$title" "Skipping database configuration."
-            set_tracker_field $tracker_key "yes"
-            return 0
+        if mysql -u"$db_user" -p"$db_pass" -e "USE cloud; SHOW TABLES LIKE 'version';" &>/dev/null; then
+            local current_db_host=$(grep "^cluster.node.IP" /etc/cloudstack/management/db.properties | cut -d= -f2)
+            if ! dialog --title "Info" --yesno "CloudStack database appears to be already configured.\nCurrent database host: $current_db_host\n\nDo you want to reconfigure it?" 10 60; then
+                show_dialog "info" "$title" "Skipping database configuration."
+                set_tracker_field $tracker_key "yes"
+                return 0
+            fi
         fi
     fi
 
     if [ -z "$BRIDGE" ]; then
         BRIDGE=$(dialog --inputbox "Enter the bridge interface name:" 8 50 "$BRIDGE" 3>&1 1>&2 2>&3)
     fi
-
     if [[ -z "$BRIDGE" ]]; then
-        show_dialog "msg" "$title" "Bridge interface name cannot be empty.\nAborting."
+        show_dialog "msg" "$title" "Bridge interface cannot be empty.\nAborting."
         return 1
     fi
 
     # Get the bridge IP
     cloudbr0_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
-
     if [[ -z "$cloudbr0_ip" ]]; then
         show_dialog "msg" "$title" "Could not determine IP address of interface '$BRIDGE'.\nAborting."
         return 1
     fi
 
-    show_dialog "info" "$title" "Starting database deployment using IP: $cloudbr0_ip"
-    if ! systemctl is-active $MYSQL_SERVICE > /dev/null; then
-         show_dialog "msg" "$title" "MySQL service is not running. Please start MySQL before proceeding." 
-        return 1
-    fi
+    show_dialog "info" "$title" "Starting CloudStack database deployment using IP: $cloudbr0_ip"
     {
-        echo "# Starting CloudStack database deployment..."
         cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i "$cloudbr0_ip" 2>&1 | \
             while IFS= read -r line; do
                 msg=$(echo "$line" | strip_ansi)
@@ -1792,129 +1732,6 @@ select_zone_deployment() {
     return $?
 }
 
-
-configure_components() {
-    local total_steps=${#SELECTED_COMPONENTS[@]}
-    local current_step=0
-    
-    # Function to check if component is selected
-    is_component_selected() {
-        local component=$1
-        [[ " ${SELECTED_COMPONENTS[@]} " =~ " $component " ]]
-    }
-
-    # Function to update progress
-    update_progress() {
-        local message=$1
-        local step=$2
-        local percent=$((step * 100 / total_steps))
-        echo "XXX"
-        echo $percent
-        echo "$message"
-        echo "XXX"
-    }
-
-    # First configure core dependencies if selected
-    # 1. Configure MySQL (if selected)
-    if is_component_selected "mysql"; then
-        current_step=$((current_step + 1))
-        update_progress "Configuring MySQL Server..." $current_step | \
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Configuring Components" \
-               --gauge "" 10 70 0
-        configure_mysql_for_cloudstack
-    fi
-
-    # 2. Configure NFS (if selected)
-    if is_component_selected "nfs"; then
-        current_step=$((current_step + 1))
-        update_progress "Configuring NFS Server..." $current_step | \
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Configuring Components" \
-               --gauge "" 10 70 0
-        configure_nfs_server
-    fi
-
-    # 3. Configure Management Server (if selected)
-    if is_component_selected "management"; then
-        # Check if dependencies are configured
-        if is_component_selected "mysql" && ! systemctl is-active --quiet $MYSQL_SERVICE; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                   --title "Error" \
-                   --msgbox "MySQL must be running before configuring Management Server" 6 60
-            return 1
-        fi
-        
-        current_step=$((current_step + 1))
-        update_progress "Configuring Management Server..." $current_step | \
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Configuring Components" \
-               --gauge "" 10 70 0
-        setup_management_server_database
-    fi
-
-    # 4. Configure KVM Agent (if selected)
-    if is_component_selected "agent"; then
-        if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                   --title "Error" \
-                   --msgbox "Management Server must be running before configuring KVM Agent" 6 60
-            return 1
-        fi
-        
-        current_step=$((current_step + 1))
-        if is_interactive; then
-            if ! dialog --backtitle "$SCRIPT_NAME" \
-                    --title "Configure KVM Agent" \
-                    --yesno "Configure KVM Host Agent.\n\nDo you want to proceed?" 10 60; then
-                dialog --backtitle "$SCRIPT_NAME" \
-                    --title "Skipped" \
-                    --msgbox "KVM Host Agent configuration skipped." 6 50
-                return 1
-            fi
-        fi
-        update_progress "Configure KVM Agent..." $current_step | \
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Configuring Components" \
-               --gauge "" 10 70 0
-        configure_kvm_agent
-    fi
-
-    # 5. Configure Usage Server (if selected)
-    if is_component_selected "usage"; then
-        if is_component_selected "management" && ! systemctl is-active --quiet cloudstack-management; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                   --title "Error" \
-                   --msgbox "Management Server must be running before configuring Usage Server" 6 60
-            return 1
-        fi
-        current_step=$((current_step + 1))
-        update_progress "Configuring Usage Server..." $current_step | \
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Configuring Components" \
-                --gauge "" 10 70 0
-        configure_usage_server
-    fi
-
-    # Show final progress
-    update_progress "Configuration complete!" $total_steps | \
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Configuring Components" \
-           --gauge "" 10 70 0
-    sleep 2
-
-    # Show configuration summary
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Configuration Summary" \
-           --msgbox "Configured components in order:\n\n$(
-                [[ " ${SELECTED_COMPONENTS[@]} " =~ " mysql " ]] && echo "✓ MySQL Server\n"
-                [[ " ${SELECTED_COMPONENTS[@]} " =~ " nfs " ]] && echo "✓ NFS Server\n"
-                [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]] && echo "✓ Management Server\n"
-                [[ " ${SELECTED_COMPONENTS[@]} " =~ " agent " ]] && echo "✓ KVM Agent\n"
-                [[ " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]] && echo "✓ Usage Server\n"
-           )" 15 60
-}
-
 configure_cloud_init() {
     # Check if already configured
     if grep -q 'config: disabled' /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null; then
@@ -2350,7 +2167,7 @@ all_in_one_box() {
                --title "Cancelled" \
                --msgbox "All-in-One installation cancelled by user." 6 60
     fi
-    SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent" "usage")
+    SELECTED_COMPONENTS=("nfs" "management" "agent" "usage")
     install_configure_components
 }
 
@@ -2364,10 +2181,9 @@ main() {
            --title "Installation Options" \
            --menu "Select an option:" 15 60 4 \
            1 "All-in-One Installation" \
-           2 "Custom Component Installation" \
+           2 "Custom Installation" \
            3 "Configure CloudStack Repository" \
-           4 "Setup Network" \
-           5 "Deploy CloudStack Zone" 2> "$temp_file"
+           4 "Deploy CloudStack Zone" 2> "$temp_file"
     if [[ $? -ne 0 ]]; then
         error_exit "Installation option selection cancelled by user"
     fi
