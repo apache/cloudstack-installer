@@ -27,7 +27,6 @@ set -euo pipefail  # Exit on error, undefined vars, pipe failures
 # Global variables
 SCRIPT_NAME="CloudStack Installer"
 CS_LOGFILE="/tmp/cloudstack-install.log"
-EXECUTION_MODE=${EXECUTION_MODE:-PROMPT} # PROMPT or SILENT
 TRACKER_FILE="$HOME/cloudstack-installer-tracker.conf"
 
 OS_TYPE=""
@@ -52,9 +51,15 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# 1 = Prompt mode (interactive), 0 = Silent (non-interactive)
+PROMPT=1
+is_interactive() { (( PROMPT )); }
+is_silent()      { (( !PROMPT )); }
+
 # Logging function
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$CS_LOGFILE"
+    # echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$CS_LOGFILE"
 }
 
 # Error handling function
@@ -123,48 +128,6 @@ set_tracker_field() {
         echo "$key=$value" >> "$TRACKER_FILE"
     fi
 }
-
-# Utility: check if key is configured, show info/msg/confirm based on mode
-check_already_configured() {
-    local key="$1"
-    local title="$2"
-    local mode="${3:-info}"
-
-    if is_configured "$key"; then
-        local value="${tracker_values[$key]}"
-
-        case "$mode" in
-            info)
-                dialog --backtitle "$SCRIPT_NAME" \
-                       --title "$title" \
-                       --infobox "$key is already configured:\n\n$value" 7 60
-                sleep 3
-                return 0
-                ;;
-            msg)
-                dialog --backtitle "$SCRIPT_NAME" \
-                       --title "$title" \
-                       --msgbox "$key is already configured:\n\n$value" 8 60
-                return 0
-                ;;
-            confirm)
-                dialog --backtitle "$SCRIPT_NAME" \
-                       --title "$title" \
-                       --yesno "$key is already configured:\n\n$value\n\nDo you want to reconfigure it?" 10 60
-                if [[ $? -ne 0 ]]; then
-                    return 0  # skip reconfiguration
-                fi
-                return 1  # proceed with reconfiguration
-                ;;
-            *)
-                echo "Unknown mode: $mode"
-                return 1
-                ;;
-        esac
-    fi
-    return 1  # not configured yet, proceed
-}
-
 
 # Check if running as root
 check_root() {
@@ -346,7 +309,7 @@ configure_cloudstack_repo() {
     local default_base_url="https://download.cloudstack.org/"
     local default_cs_version="4.20"
     local repo_base_url cs_version
-    if [[ "$EXECUTION_MODE" == "PROMPT" ]]; then
+    if is_interactive; then
         local form_output
         form_output=$(mktemp)
         dialog --clear --form "Configure CloudStack Repository" 12 70 2 \
@@ -544,7 +507,7 @@ install_base_dependencies() {
             echo "$title\n\n$tail_output"
             echo "XXX"
             PERCENT=$((PERCENT + 1))
-            [ "$PERCENT" -ge 98 ] && PERCENT=98
+            [ "$PERCENT" -ge 90 ] && PERCENT=90
             sleep 1
         done
 
@@ -563,53 +526,214 @@ install_base_dependencies() {
     rm -f "$TMP_LOG"
 }
 
-# Function to install packages based on the detected OS
+is_package_installed() {
+    local pkgs=("$@")  # Accept multiple packages
+    local pkg
+
+    for pkg in "${pkgs[@]}"; do
+        case "$PACKAGE_MANAGER" in
+            apt)
+                if ! dpkg -s "$pkg" &>/dev/null; then
+                    return 1  # one package missing -> not installed
+                fi
+                ;;
+            dnf)
+                if ! dnf list installed "$pkg" &>/dev/null; then
+                    return 1
+                fi
+                ;;
+        esac
+    done
+
+    return 0  # all packages installed
+}
+
+
 install_package() {
-    local package_name=$1
+    local packages=("$@")  # Capture all arguments (1..N)
+
     case "$PACKAGE_MANAGER" in
         apt)
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package_name"
-            return $?
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
             ;;
         dnf)
-            dnf install -y "$package_name" >> "$log_file"
-            return $?
+            dnf install -y "${packages[@]}"
+            ;;
+        *)
+            echo "Unsupported package manager: $PACKAGE_MANAGER" >&2
+            return 1
             ;;
     esac
 }
 
+
+
 # Function to install CloudStack Management Server
 install_management_server() {
-    install_package "cloudstack-management"
-    systemctl stop cloudstack-management
+    local package_name="cloudstack-management"
+    local tracker_key="management_installed"
+    if is_configured "$tracker_key"; then
+        log "CloudStack Management Server is already installed. Skipping installation."
+        return 0
+    fi
+    if is_package_installed "$package_name"; then
+        log "CloudStack Management Server is already installed."
+        set_tracker_field "$tracker_key" "yes"
+        return 0
+    fi
+    install_with_progress "CloudStack Management Server" "$package_name" "$tracker_key"
 }
 
 # Function to install CloudStack Usage Server
 install_usage_server() {
-    install_package "cloudstack-usage"
+    local package_name="cloudstack-usage"
+    local tracker_key="usage_installed"
+    if is_configured $tracker_key; then
+        log "CloudStack Usage Server is already installed. Skipping installation."
+        return 0
+    fi
+    if is_package_installed "$package_name"; then
+        log "CloudStack Usage Server is already installed."
+        set_tracker_field "$tracker_key" "yes"
+        return 0
+    fi
+
+    # check if mysql and management server are installed
+    if ! is_package_installed "cloudstack-management" "mysql-server"; then
+        error_exit "CloudStack Management Server and MySQL Server must be installed before installing the Usage Server."
+    fi
+
+    install_with_progress "CloudStack Usage Server" "$package_name" "$tracker_key"
 }
 
 # Function to install KVM Agent
 install_kvm_agent() {
-    install_package "cloudstack-agent"
+    local package_name="cloudstack-agent"
+    local tracker_key="agent_installed"
+    if is_configured $tracker_key; then
+        log "KVM Agent is already installed. Skipping installation."
+        return 0
+    fi
+    if is_package_installed "$package_name"; then
+        log "KVM Agent is already installed."
+        set_tracker_field "$tracker_key" "yes"
+        return 0
+    fi
+    install_with_progress "CloudStack Agent" "$package_name" "$tracker_key"
 }
 
-# Function to install MySQL Server
 install_mysql_server() {
-    install_package "mysql-server"
-    systemctl start $MYSQL_SERVICE
+    local package_name="mysql-server"
+    local tracker_key="mysql_installed"
+    if is_configured $tracker_key; then
+        log "MySQL is already installed. Skipping installation."
+        return 0
+    fi
+
+    if is_package_installed "$package_name"; then
+        log "MySQL Server is already installed."
+        set_tracker_field "$tracker_key" "yes"
+        return 0
+    fi
+    install_with_progress "MySQL Server" "$package_name" "$tracker_key"
+}
+
+install_with_progress() {
+    local title="$1"
+    local package_name="$2"
+    local tracker_key="$3"
+
+    # Skip if already configured
+    if is_configured "$tracker_key"; then
+        log "$title is already installed. Skipping."
+        show_dialog "info" "$title Installation" "$title is already installed. Skipping installation."
+        return 0
+    fi
+
+    # Skip if package already installed
+    if is_package_installed "$package_name"; then
+        log "$title package already present. Skipping installation."
+        set_tracker_field "$tracker_key" "yes"
+        show_dialog "info" "$title Installation" "$title package already present. Skipping installation."
+        return 0
+    fi
+
+    log "Installing $title..."
+
+    # Temporary log file
+    local TMP_LOG
+    TMP_LOG=$(mktemp /tmp/install_${tracker_key}.XXXXXX.log)
+
+    # Start installation in the background
+    install_package $package_name >> "$TMP_LOG" 2>&1 &
+    local INSTALL_PID=$!
+
+    local percent=0
+    local start_msg="Installing $title..."
+
+    {
+        echo "$percent"
+        echo "XXX"
+        echo "# $start_msg"
+        echo "XXX"
+
+        while kill -0 "$INSTALL_PID" 2>/dev/null; do
+            local tail_output
+            tail_output=$(tail -n 5 "$TMP_LOG" | strip_ansi | tr '\n' ' ' | cut -c -300)
+
+            echo "$percent"
+            echo "XXX"
+            echo "# $start_msg"
+            echo "#"
+            echo "# $tail_output"
+            echo "XXX"
+
+            percent=$((percent + 1))
+            [ $percent -gt 90 ] && percent=90
+            sleep 1
+        done
+    } | dialog --backtitle "$SCRIPT_NAME" --title "$title Installation" --gauge "Installing $title..." 15 70 0
+
+    wait "$INSTALL_PID"
+    local status=$?
+
+    if [ $status -eq 0 ]; then
+        set_tracker_field "$tracker_key" "yes"
+        log "$title installed successfully."
+        rm -f "$TMP_LOG"
+        return 0
+    else
+        log "Failed to install $title. Check $TMP_LOG"
+        error_exit "Failed to install $title."
+    fi
 }
 
 # Function to install NFS Server
 install_nfs_server() {
+    local tracker_key="nfs_installed"
+    if is_configured $tracker_key; then
+        log "NFS Server is already installed. Skipping installation."
+        show_dialog "info" "NFS Server Installation" "NFS Server is already installed. Skipping installation."
+        return 0
+    fi
+
+    if command -v exportfs &>/dev/null; then
+        log "NFS Server is already installed."
+        set_tracker_field $tracker_key "yes"
+        show_dialog "info" "NFS Server Installation" "NFS Server is already installed. Skipping installation."
+        return 0
+    fi
+
+    local package_name=""
     case "$PACKAGE_MANAGER" in
         apt)
-            apt-get install -y nfs-kernel-server nfs-common quota
+            package_name="nfs-kernel-server nfs-common quota"
             ;;
         dnf)
-            dnf install -y nfs-utils quota
+            package_name="nfs-utils quota"
             ;;
     esac
+    install_with_progress "NFS Server" "$package_name" "$tracker_key"
 }
 
 select_components() {
@@ -641,7 +765,7 @@ select_components() {
     log "Selected components: ${SELECTED_COMPONENTS[*]}"
 }
 
-display_components_versions() {
+show_components_versions() {
     local versions=()
     local component version_info
 
@@ -694,16 +818,14 @@ display_components_versions() {
         esac
     done
 
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Installing Components" \
-           --msgbox "Available versions from repository:\n\n$(printf '%s\n' "${versions[@]}")" 18 70
+    show_dialog info "Component Versions" "Available versions from repository:\n\n$(printf '%s\n' "${versions[@]}")" 6 10 60
 }
 
 install_components() {
     TMP_LOG=$(mktemp /tmp/component_install.XXXXXX.log)
     local total_steps=${#SELECTED_COMPONENTS[@]}
     local current_step=0
-    display_components_versions
+    show_components_versions
 
     {
         for component in "${SELECTED_COMPONENTS[@]}"; do
@@ -763,41 +885,42 @@ install_components() {
                --gauge "Starting installation..." 15 70 0
 }
 
-configure_mysql() {
-  MYSQL_VERSION=$(mysql -V 2>/dev/null || echo "MySQL not found")
-  dialog --title "MySQL Configuration" --msgbox "Detected MySQL Version:\n$MYSQL_VERSION" 8 50
-  if [[ "$MYSQL_VERSION" == "MySQL not found" ]]; then
-    dialog --title "Error" --msgbox "MySQL is not installed. Please install MySQL first." 6 50
-    return 1
-  fi
+configure_mysql_for_cloudstack() {
+    local tracker_key="mysql_configured"
+    if is_configured $tracker_key; then
+        log "MySQL is already configured for CloudStack. Skipping configuration."
+        return 0
+    fi
+    log "Starting MySQL configuration..."
+    local title="MySQL Configuration"
+    MYSQL_VERSION=$(mysql -V 2>/dev/null || echo "MySQL not found")
+    if [[ "$MYSQL_VERSION" == "MySQL not found" ]]; then
+        show_dialog "msg" "$title" "MySQL is not installed. Please install MySQL first."
+        return 1
+    fi
   
-  local config_file="$MYSQL_CONF_DIR/cloudstack.cnf"
-  if [[ -f "$config_file" ]]; then
-    dialog --title "MySQL Configuration" --msgbox "Configuration already exists at:\n$config_file\nSkipping MySQL setup." 8 60
-    return
-  fi
-
-  mkdir -p "$MYSQL_CONF_DIR"
-
-    if ! dialog --yesno "Do you want to configure MySQL for CloudStack?" 7 50; then
-        dialog --msgbox "MySQL configuration skipped." 5 40
+    local config_file="$MYSQL_CONF_DIR/cloudstack.cnf"
+    if [[ -f "$config_file" ]]; then
+        show_dialog "info" "$title" "Configuration already exists at:\n$config_file\nSkipping MySQL setup."
+        set_tracker_field $tracker_key "yes"
         return 0
     fi
 
-  # ensure mysql is running
-  if ! systemctl is-active --quiet $MYSQL_SERVICE; then
-    dialog --title "MySQL Configuration" --msgbox "MySQL service is not running. Please start MySQL before proceeding." 6 50
-    return 1
-  fi
+    mkdir -p "$MYSQL_CONF_DIR"
 
-  sqlmode="$(mysql -B -e "show global variables like 'sql_mode'" 2>/dev/null | grep sql_mode | awk '{ print $2; }' | sed -e 's/ONLY_FULL_GROUP_BY,//')"
+    if ! systemctl is-active --quiet $MYSQL_SERVICE; then
+        dialog --title "$title" --msgbox "MySQL service is not running. Please start MySQL before proceeding." 6 50
+        return 1
+    fi
 
-  if [[ -z "$sqlmode" ]]; then
-    dialog --msgbox "Failed to fetch current SQL mode. Aborting." 6 50
-    return 1
-  fi
+    sqlmode="$(mysql -B -e "show global variables like 'sql_mode'" 2>/dev/null | grep sql_mode | awk '{ print $2; }' | sed -e 's/ONLY_FULL_GROUP_BY,//')"
+
+    if [[ -z "$sqlmode" ]]; then
+        dialog --msgbox "Failed to fetch current SQL mode. Aborting." 6 50
+        return 1
+    fi
   
-  cat > "$config_file" <<EOF
+    cat > "$config_file" <<EOF
 [mysqld]
 server_id = 1
 sql_mode = "$sqlmode"
@@ -808,9 +931,10 @@ log_bin = mysql-bin
 binlog_format = "ROW"
 EOF
 
-  systemctl restart $MYSQL_SERVICE && \
-    dialog --msgbox "MySQL has been configured and restarted successfully." 6 50 || \
-    dialog --msgbox "Failed to restart MySQL. Please check the service manually." 6 60
+    systemctl restart $MYSQL_SERVICE && \
+    show_dialog "info" "$title" "MySQL has been configured and restarted successfully."|| \
+    show_dialog "info" "$title" "Failed to restart MySQL. Please check the service manually."
+    set_tracker_field $tracker_key "yes"
 }
 
 get_local_cidr() {
@@ -838,33 +962,36 @@ get_export_cidr() {
 
 
 configure_nfs_server() {
-  dialog --title "NFS Configuration" --msgbox "Starting NFS storage configuration..." 6 50
-
-  if grep -q "^/export " /etc/exports; then
-    dialog --title "NFS Configuration" --msgbox "NFS is already configured. Skipping setup." 6 50
-    return
-  fi
-
-  dialog --title "NFS Setup" --yesno "Do you want to configure the system as an NFS server with:\n\n• Export path: /export\n• Subdirs: /primary & /secondary\n• Permissions: rw, no_root_squash\n\nProceed?" 12 60
-  [[ $? -ne 0 ]] && dialog --msgbox "NFS configuration skipped." 5 40 && return
+    local tracker_key="nfs_configured"
+    local title="NFS Storage Configuration"
+    if is_configured $tracker_key; then
+        log "NFS storage is already configured. Skipping setup."
+        return 0
+    fi
+    log "Starting NFS storage configuration..."
+    if grep -q "^/export " /etc/exports; then
+        show_dialog "info" "$title" "NFS is already configured. Skipping setup."
+        return 0
+        set_tracker_field $tracker_key "yes"
+    fi
 
     local export_cidr=$(get_export_cidr)
-  # Step 1: Create exports and directories
-  echo "/export  ${export_cidr}(rw,async,no_root_squash,no_subtree_check)" >> /etc/exports
-  mkdir -p /export/primary /export/secondary
-  exportfs -a
+    # Step 1: Create exports and directories
+    echo "/export  ${export_cidr}(rw,async,no_root_squash,no_subtree_check)" >> /etc/exports
+    mkdir -p /export/primary /export/secondary
+    exportfs -a
 
-  # Step 2: Configure ports and services based on distro
-  if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
-    sed -i -e 's/^RPCMOUNTDOPTS="--manage-gids"$/RPCMOUNTDOPTS="-p 892 --manage-gids"/g' /etc/default/nfs-kernel-server
-    sed -i -e 's/^STATDOPTS=$/STATDOPTS="--port 662 --outgoing-port 2020"/g' /etc/default/nfs-common
-    grep -q 'NEED_STATD=yes' /etc/default/nfs-common || echo "NEED_STATD=yes" >> /etc/default/nfs-common
-    sed -i -e 's/^RPCRQUOTADOPTS=$/RPCRQUOTADOPTS="-p 875"/g' /etc/default/quota
+    # Step 2: Configure ports and services based on distro
+    if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
+        sed -i -e 's/^RPCMOUNTDOPTS="--manage-gids"$/RPCMOUNTDOPTS="-p 892 --manage-gids"/g' /etc/default/nfs-kernel-server
+        sed -i -e 's/^STATDOPTS=$/STATDOPTS="--port 662 --outgoing-port 2020"/g' /etc/default/nfs-common
+        grep -q 'NEED_STATD=yes' /etc/default/nfs-common || echo "NEED_STATD=yes" >> /etc/default/nfs-common
+        sed -i -e 's/^RPCRQUOTADOPTS=$/RPCRQUOTADOPTS="-p 875"/g' /etc/default/quota
 
-    systemctl restart nfs-kernel-server
-    SERVICE_STATUS=$?
-  
-  elif [[ "$OS_TYPE" =~ ^(rhel|centos|ol|rocky|almalinux)$ ]]; then
+        systemctl restart nfs-kernel-server
+        SERVICE_STATUS=$?
+    
+    elif [[ "$OS_TYPE" =~ ^(rhel|centos|ol|rocky|almalinux)$ ]]; then
     # Set ports in /etc/sysconfig/nfs if needed
     cat <<EOF >> /etc/sysconfig/nfs
 MOUNTD_PORT=892
@@ -887,32 +1014,34 @@ EOF
       firewall-cmd --reload
     fi
   else
-    dialog --title "Error" --msgbox "Unsupported distribution: $OS_TYPE" 6 50
+    show_dialog "info" "$title"  "Unsupported distribution: $OS_TYPE"
     return 1
   fi
 
   # Step 3: Final result
   if [[ $SERVICE_STATUS -eq 0 ]]; then
     exports_list=$(exportfs)
-    dialog --title "NFS Configuration Complete" --msgbox "NFS Server configured and restarted successfully.\n\nCurrent exports:\n$exports_list" 15 70
+    show_dialog "info" "$title" "NFS Server configured and restarted successfully.\n\nCurrent exports:\n$exports_list"
+    set_tracker_field $tracker_key "yes"
+    log "NFS server configured successfully."
   else
-    dialog --title "Error" --msgbox "Failed to restart NFS server. Please check the service logs." 6 60
+    show_dialog "info" "$title" "Failed to restart NFS server. Please check the service logs."
   fi
 }
 
-configure_management_server() {
-    if systemctl is-active cloudstack-management > /dev/null; then
-        dialog --title "Info" --msgbox "CloudStack Management Server is already running.\nSkipping DB deployment." 7 60
-        return
+setup_management_server_database() {
+    local title="CloudStack Database Deployment"
+    local tracker_key="db_deployed"
+    if is_configured $tracker_key; then
+        log "CloudStack database is already deployed. Skipping deployment."
+        return 0
     fi
-
+    log "Starting CloudStack database deployment..."
     if [[ -f "/etc/cloudstack/management/db.properties" ]]; then
         local current_db_host=$(grep "^cluster.node.IP" /etc/cloudstack/management/db.properties | cut -d= -f2)
-        dialog --title "Info" \
-               --yesno "CloudStack database appears to be already configured.\nCurrent database host: $current_db_host\n\nDo you want to reconfigure it?" 10 60
-        if [[ $? -ne 0 ]]; then
-            dialog --title "Info" \
-                   --msgbox "Skipping database configuration." 6 50
+        if ! dialog --title "Info" --yesno "CloudStack database appears to be already configured.\nCurrent database host: $current_db_host\n\nDo you want to reconfigure it?" 10 60; then
+            show_dialog "info" "$title" "Skipping database configuration."
+            set_tracker_field $tracker_key "yes"
             return 0
         fi
     fi
@@ -922,7 +1051,7 @@ configure_management_server() {
     fi
 
     if [[ -z "$BRIDGE" ]]; then
-        dialog --title "Error" --msgbox "Bridge interface name cannot be empty.\nAborting." 7 50
+        show_dialog "msg" "$title" "Bridge interface name cannot be empty.\nAborting."
         return 1
     fi
 
@@ -930,14 +1059,13 @@ configure_management_server() {
     cloudbr0_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
 
     if [[ -z "$cloudbr0_ip" ]]; then
-        dialog --title "Error" --msgbox "Could not determine IP address of interface '$BRIDGE'.\nAborting." 8 60
+        show_dialog "msg" "$title" "Could not determine IP address of interface '$BRIDGE'.\nAborting."
         return 1
     fi
 
-    dialog --title "Info" --msgbox "Using IP address: $cloudbr0_ip for CloudStack DB setup." 7 60
-    # Check if MySQL is running
+    show_dialog "info" "$title" "Starting database deployment using IP: $cloudbr0_ip"
     if ! systemctl is-active $MYSQL_SERVICE > /dev/null; then
-        dialog --title "Error" --msgbox "MySQL service is not running. Please start MySQL before proceeding." 7 60
+         show_dialog "msg" "$title" "MySQL service is not running. Please start MySQL before proceeding." 
         return 1
     fi
     {
@@ -951,7 +1079,7 @@ configure_management_server() {
                 echo "XXX"
             done
     } | dialog --backtitle "$SCRIPT_NAME" \
-               --title "Database Deployment" \
+               --title "$title" \
                --gauge "Starting database deployment..." 10 70 0
 
     {
@@ -969,13 +1097,19 @@ configure_management_server() {
                --gauge "Starting management server setup..." 10 70 0
 
     sleep 5
-    show_dialog "CloudStack Configuration" "CloudStack Management Server has been configured."
+    set_tracker_field $tracker_key "yes"
+    show_dialog "info" "CloudStack Configuration" "CloudStack Management Server has been configured."
 }
 
 configure_kvm_agent() {
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "KVM Host Configuration" \
-           --infobox "Starting KVM host configuration..." 5 50
+    local tracker_key="agent_configured"
+    local title="KVM Host Configuration"
+    if is_configured $tracker_key; then
+        log "KVM Agent is already configured. Skipping configuration."
+        return 0
+    fi
+    log "Starting KVM host configuration..."
+    show_dialog "info" "$title" "Starting KVM host configuration..."
 
     # Configure VNC
     {
@@ -1129,8 +1263,8 @@ EOF
         echo "KVM host configuration completed!"
         echo "XXX"
     } | dialog --backtitle "$SCRIPT_NAME" \
-               --title "KVM Host Configuration" \
-               --gauge "Configuring KVM host..." 10 70 0
+               --title "KVM Agent Configuration" \
+               --gauge "Configuring KVM Agent..." 10 70 0
 
     # Show configuration summary
     local summary="KVM Host Configuration Summary:\n\n"
@@ -1146,21 +1280,39 @@ EOF
     dialog --backtitle "$SCRIPT_NAME" \
            --title "Configuration Complete" \
            --msgbox "$summary" 15 60
+    
+    show_dialog "info" "$title" "$summary" 15 60
 
     # Verify configuration
     if ! systemctl is-active --quiet libvirtd; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Warning" \
-               --msgbox "Libvirt service is not running! Please check system logs." 6 60
+        show_dialog "msg" "$title" "Libvirt service is not running! Please check system logs."
     fi
+    set_tracker_field $tracker_key "yes"
 }
 
 configure_usage_server() {
+    log "Configuring CloudStack Usage Server..."
+    local tracker_key="usage_configured"
+    if is_configured $tracker_key; then
+        log "Usage Server is already configured. Skipping configuration."
+        return 0
+    fi
+    log "Starting Usage Server configuration..."
+    show_dialog "info" "Usage Server Configuration" "Starting Usage Server configuration..."
+    # confirm db.properties and key exist
+    local db_properties="/etc/cloudstack/usage/db.properties"
+    local key_file="/etc/cloudstack/usage/key"
+
+    if [[ ! -f "$db_properties" || ! -f "$key_file" ]]; then
+        show_dialog "msg" "Usage Server Configuration" "Database configuration files not found!\nPlease ensure CloudStack Management Server is configured."
+        return 1
+    fi
+
     sleep 5
 }
 
 wait_for_management_server() {
-    local timeout=300  # 5 minutes timeout
+    local timeout=600  # 10 minutes timeout
     local interval=10  # Check every 10 seconds
     local elapsed=0
     local url="http://$HOST_IP:8080/client/api"
@@ -1169,7 +1321,7 @@ wait_for_management_server() {
         while [ $elapsed -lt $timeout ]; do
             echo "XXX"
             echo "$((elapsed * 100 / timeout))"
-            echo "Waiting for Management Server to be ready...\n\nElapsed time: ${elapsed}s / ${timeout}s"
+            echo "Waiting for Management Server to be ready...\n\nElapsed time: ${elapsed}s"
             echo "XXX"
             
             local status_code=$(curl -s -o /dev/null -w "%{http_code}" "$url")
@@ -1275,6 +1427,7 @@ find_free_ip_range() {
 }
 
 deploy_zone() {
+    local title="Zone Deployment"
     log "Starting zone deployment..."
     if [[ -z "$BRIDGE" ]]; then
         BRIDGE=$(dialog --backtitle "$SCRIPT_NAME" \
@@ -1286,12 +1439,16 @@ deploy_zone() {
     HOST_IP=$(ip -4 addr show "$BRIDGE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
     GATEWAY=$(ip route | grep default | grep "$BRIDGE" | awk '{print $3}')
 
-    local input_ip=$(dialog --backtitle "$SCRIPT_NAME" \
-        --title "Host Configuration" \
-        --inputbox "Detected Host IP: $HOST_IP\n\nYou can modify these values if needed." 10 60 "$HOST_IP" 3>&1 1>&2 2>&3)
-    local input_gw=$(dialog --backtitle "$SCRIPT_NAME" \
-        --title "Host Configuration" \
-        --inputbox "Detected Gateway: $GATEWAY\n\nYou can modify these values if needed." 10 60 "$GATEWAY" 3>&1 1>&2 2>&3)  
+    local input_ip=""
+    local input_gw=""
+    if is_interactive; then
+        input_ip=$(dialog --backtitle "$SCRIPT_NAME" \
+            --title "Host Configuration" \
+            --inputbox "KVM Host IP: $HOST_IP\n\nWant to modify." 10 60 "$HOST_IP" 3>&1 1>&2 2>&3)
+        input_gw=$(dialog --backtitle "$SCRIPT_NAME" \
+            --title "Host Configuration" \
+            --inputbox "Detected Gateway: $GATEWAY\n\nWant to modify." 10 60 "$GATEWAY" 3>&1 1>&2 2>&3)  
+    fi
     KVM_HOST_IP=${input_ip:-$HOST_IP}
     GATEWAY=${input_gw:-$GATEWAY}
 
@@ -1299,14 +1456,13 @@ deploy_zone() {
         error_exit "Could not determine host IP or gateway. Is bridge $BRIDGE configured properly?"
     fi
 
-
     # Prompt for root password before starting zone deployment
     local MAX_ATTEMPTS=3
     local attempt=0
     local root_pass
     while true; do
         root_pass=$(dialog --backtitle "$SCRIPT_NAME" \
-            --title "Host Configuration" \
+            --title "$title" \
             --insecure \
             --passwordbox "Enter root password for KVM host ($KVM_HOST_IP):" 8 60 \
             3>&1 1>&2 2>&3)
@@ -1344,26 +1500,11 @@ deploy_zone() {
         fi
     done
 
-    if ! wait_for_management_server; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Error" \
-               --msgbox "Management Server did not become ready in time.\nPlease check the server status and logs." 8 60
-        return 1
-    fi
-
-    if ! check_cloudmonkey; then
-        dialog --backtitle "$SCRIPT_NAME" \
-               --title "Error" \
-               --msgbox "CloudMonkey is not available or failed to initialize.\nPlease install CloudMonkey and try again." 8 60
-        return 1
-    fi
-
     local network="${HOST_IP%.*}.0/24"
     # Find IPs for different purposes
     local public_ips=($(find_free_ip_range "$network" 11 20))  # 20 IPs for public
     local pod_ips=($(find_free_ip_range "$network" 31 20))     # 20 IPs for pod
     local guest_ips=($(find_free_ip_range "$network" 51 50))   # 50 IPs for guest
-
 
     # Default values
     local defaults=(
@@ -1385,58 +1526,59 @@ deploy_zone() {
         "Primary Storage Path" "/export/primary"
         "Secondary Storage Path" "/export/secondary"
     )
+    
+    local results=()
+    if is_interactive; then
+        # Create form entries
+        local form_height=$((${#defaults[@]} / 2 + 8))
+        local form_entries=()
+        local i=0
+        while [[ $i -lt ${#defaults[@]} ]]; do
+            form_entries+=("${defaults[i]}")     # Label
+            form_entries+=("$((i/2+1))")         # Row
+            form_entries+=("1")                  # Label column
+            form_entries+=("${defaults[i+1]}")   # Default value
+            form_entries+=("$((i/2+1))")         # Row for input
+            form_entries+=("35")                 # Input column
+            form_entries+=("30")                 # Field width
+            form_entries+=("0")                  # Max input length
+            ((i+=2))
+        done
 
-    # Create form entries
-    local form_height=$((${#defaults[@]} / 2 + 8))
-    local form_entries=()
-    local i=0
-    while [[ $i -lt ${#defaults[@]} ]]; do
-        form_entries+=("${defaults[i]}")     # Label
-        form_entries+=("$((i/2+1))")         # Row
-        form_entries+=("1")                  # Label column
-        form_entries+=("${defaults[i+1]}")   # Default value
-        form_entries+=("$((i/2+1))")         # Row for input
-        form_entries+=("35")                 # Input column
-        form_entries+=("30")                 # Field width
-        form_entries+=("0")                  # Max input length
-        ((i+=2))
-    done
-
-
-    # show form entries
-    echo "Form Entries:"
-    for entry in "${form_entries[@]}"; do
-        echo "$entry"
-    done
-
-    form_args=(
-        --backtitle "$SCRIPT_NAME"
-        --title "Zone Configuration"
-        --form "Configure Zone Deployment Parameters:"
-        $form_height 70 0
-    )
-
-    for ((i=0; i<${#form_entries[@]}; i+=8)); do
-        form_args+=(
-            "${form_entries[i]}"      # Label
-            "${form_entries[i+1]}"    # Row
-            "${form_entries[i+2]}"    # Label column
-            "${form_entries[i+3]}"    # Default value
-            "${form_entries[i+4]}"    # Input row
-            "${form_entries[i+5]}"    # Input column
-            "${form_entries[i+6]}"    # Field width
-            "${form_entries[i+7]}"    # Max length
+        form_args=(
+            --backtitle "$SCRIPT_NAME"
+            --title "Zone Configuration"
+            --form "Configure Zone Deployment Parameters:"
+            $form_height 70 0
         )
-    done
-    if ! results=$(dialog "${form_args[@]}" 2>&1 >/dev/tty); then
-        dialog --backtitle "$SCRIPT_NAME" \
-            --title "Cancelled" \
-            --msgbox "Zone configuration was cancelled." 6 50
-        return 1
-    fi
 
-    # Convert results string into array
-    mapfile -t results <<< "$results"
+        for ((i=0; i<${#form_entries[@]}; i+=8)); do
+            form_args+=(
+                "${form_entries[i]}"      # Label
+                "${form_entries[i+1]}"    # Row
+                "${form_entries[i+2]}"    # Label column
+                "${form_entries[i+3]}"    # Default value
+                "${form_entries[i+4]}"    # Input row
+                "${form_entries[i+5]}"    # Input column
+                "${form_entries[i+6]}"    # Field width
+                "${form_entries[i+7]}"    # Max length
+            )
+        done
+        if ! results=$(dialog "${form_args[@]}" 2>&1 >/dev/tty); then
+            dialog --backtitle "$SCRIPT_NAME" \
+                --title "Cancelled" \
+                --msgbox "Zone configuration was cancelled." 6 50
+            return 1
+        fi
+
+        # Convert results string into array
+        mapfile -t results <<< "$results"
+    else
+        results=()
+        for ((i=1; i<${#defaults[@]}; i+=2)); do
+            results+=("${defaults[i]}")
+        done
+    fi
 
     # Map results to variables
     local zone_name="${results[0]}"
@@ -1473,12 +1615,28 @@ deploy_zone() {
         return 1
     fi
 
+    if ! wait_for_management_server; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Error" \
+               --msgbox "Management Server did not become ready in time.\nPlease check the server status and logs." 8 60
+        return 1
+    fi
+
+    if ! check_cloudmonkey; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Error" \
+               --msgbox "CloudMonkey is not available or failed to initialize.\nPlease install CloudMonkey and try again." 8 60
+        return 1
+    fi
+
     local zone_id=""
     local pod_id=""
     local cluster_id="" 
     {
+        echo "XXX"
         echo "10"
         echo "# Starting Zone deployment..."
+        echo "XXX"
 
         zone_output=$(cmk create zone name="${zone_name}" \
             networktype="$network_type" \
@@ -1493,24 +1651,29 @@ deploy_zone() {
             echo "Failed to create zone: $zone_output"
             return 1
         fi
-
+        echo "XXX"
         echo "20"
         echo "# Creating Physical Network..."
+        echo "XXX"
         local phy_id=$(cmk create physicalnetwork name="$phy_name" \
             zoneid="$zone_id" \
             isolationmethods="VLAN" | jq -r '.physicalnetwork.id')
         
         [[ -z "$phy_id" ]] && error_exit "Failed to create physical network"
         
+        echo "XXX"
         echo "30"
         echo "# Adding Traffic Types..."
+        echo "XXX"
         # Add Traffic Types
         cmk add traffictype traffictype=Management physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Guest physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Public physicalnetworkid="$phy_id"
 
+        echo "XXX"
         echo "35"
         echo "# Adding IP Ranges..."
+        echo "XXX"
 
         # Add Public IP Range
         if ! cmk create vlaniprange \
@@ -1529,9 +1692,11 @@ deploy_zone() {
         fi
         cmk update physicalnetwork id=$phy_id vlan=$vlan_range
         
+        echo "XXX"
         echo "40"
         echo "Configuring Virtual Router..."
         cmk update physicalnetwork state=Enabled id="$phy_id"
+        echo "XXX"
         
         local nsp_id=$(cmk list networkserviceproviders name=VirtualRouter physicalnetworkid="$phy_id" | jq -r '.networkserviceprovider[0].id')
         local vre_id=$(cmk list virtualrouterelements nspid="$nsp_id" | jq -r '.virtualrouterelement[0].id')
@@ -1615,10 +1780,7 @@ deploy_zone() {
                --title "Zone Deployment" \
                --gauge "Deploying CloudStack Zone..." 10 70 0
 
-    # Show final success message
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Success" \
-           --msgbox "CloudStack Zone has been successfully deployed!" 12 60
+    show_dialog "info" "$title" "Zone deployment completed successfully."
     show_cloudstack_banner
 }
 
@@ -1660,7 +1822,7 @@ configure_components() {
         dialog --backtitle "$SCRIPT_NAME" \
                --title "Configuring Components" \
                --gauge "" 10 70 0
-        configure_mysql
+        configure_mysql_for_cloudstack
     fi
 
     # 2. Configure NFS (if selected)
@@ -1688,7 +1850,7 @@ configure_components() {
         dialog --backtitle "$SCRIPT_NAME" \
                --title "Configuring Components" \
                --gauge "" 10 70 0
-        configure_management_server
+        setup_management_server_database
     fi
 
     # 4. Configure KVM Agent (if selected)
@@ -1701,13 +1863,15 @@ configure_components() {
         fi
         
         current_step=$((current_step + 1))
-        if ! dialog --backtitle "$SCRIPT_NAME" \
-                   --title "Configure KVM Agent" \
-                   --yesno "Configure KVM Host Agent.\n\nDo you want to proceed?" 10 60; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                   --title "Skipped" \
-                   --msgbox "KVM Host Agent configuration skipped." 6 50
-            return 1
+        if is_interactive; then
+            if ! dialog --backtitle "$SCRIPT_NAME" \
+                    --title "Configure KVM Agent" \
+                    --yesno "Configure KVM Host Agent.\n\nDo you want to proceed?" 10 60; then
+                dialog --backtitle "$SCRIPT_NAME" \
+                    --title "Skipped" \
+                    --msgbox "KVM Host Agent configuration skipped." 6 50
+                return 1
+            fi
         fi
         update_progress "Configure KVM Agent..." $current_step | \
         dialog --backtitle "$SCRIPT_NAME" \
@@ -1777,25 +1941,27 @@ show_dialog() {
     local title="$2"
     local msg="$3"
     local seconds="${4:-3}"
+    local height="${5:-7}"
+    local width="${6:-60}"
 
     case "$mode" in
         info)
             dialog --backtitle "$SCRIPT_NAME" \
                     --title "$title" \
-                    --infobox "$msg" 7 60
+                    --infobox "$msg" $height $width
             sleep "$seconds"
             return 0
             ;;
         msg)
             dialog --backtitle "$SCRIPT_NAME" \
                     --title "$title" \
-                    --msgbox "$msg" 8 60
+                    --msgbox "$msg" $height $width
             return 0
             ;;
         confirm)
             dialog --backtitle "$SCRIPT_NAME" \
                     --title "$title" \
-                    --yesno "$msg" 10 60
+                    --yesno "$msg" $height $width
             if [[ $? -ne 0 ]]; then
                 return 0
             fi
@@ -1864,9 +2030,10 @@ EOF
         rm -f /etc/netplan/50-cloud-init.yaml
 
         if netplan generate && netplan apply; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                   --title "Success" \
-                   --msgbox "Bridge $BRIDGE configured successfully with Netplan." 7 60
+            show_dialog \
+                "info" \
+                "Network Configuration" \
+                "Bridge $BRIDGE configured successfully with IP $hostipandsub."
         else
             error_exit "Failed to apply Netplan configuration"
         fi
@@ -2004,6 +2171,42 @@ setup_repo() {
     configure_cloudstack_repo
 }
 
+install_configure_mgmt() {
+    install_management_server
+    install_mysql_server
+    configure_mysql_for_cloudstack
+    setup_management_server_database
+}
+
+install_configure_agent() {
+    install_kvm_agent
+    configure_kvm_agent
+}
+
+install_configure_usage() {
+    install_usage_server
+    configure_usage_server
+}
+
+install_configure_components() {
+    show_components_versions
+    if [[ " ${SELECTED_COMPONENTS[@]} " =~ " nfs " ]]; then
+        install_nfs_server
+        configure_nfs_server
+    fi
+
+    if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]]; then
+        install_configure_mgmt
+    fi
+
+    if [[ " ${SELECTED_COMPONENTS[@]} " =~ " agent " ]]; then
+        install_configure_agent
+    fi
+    if [[ " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]]; then
+        install_configure_usage
+    fi
+}
+
 show_validation_summary() {
     local summary=""
     local status_ok=true
@@ -2094,7 +2297,7 @@ show_validation_summary() {
             summary+="✓ Usage Server: Running\n"
         else
             summary+="✗ Usage Server: Not running\n"
-            status_ok=false
+            status_ok=true   # not critical for zone deployment
         fi
     fi
 
@@ -2133,14 +2336,12 @@ validate_setup_pre_req() {
 }
 
 custom_install() {
-    clear
-    log "Starting CloudStack installation script"
     select_components
-    install_components
-    configure_components
+    install_configure_components
 }
 
 all_in_one_box() {
+    PROMPT=0
     dialog --backtitle "$SCRIPT_NAME" \
            --title "All-in-One Installation" \
            --yesno "You have selected all components for installation. This will configure a complete CloudStack setup on this single machine.\n\nProceed with All-in-One installation?" 12 60
@@ -2150,15 +2351,14 @@ all_in_one_box() {
                --msgbox "All-in-One installation cancelled by user." 6 60
     fi
     SELECTED_COMPONENTS=("nfs" "mysql" "management" "agent" "usage")
-    install_components
-    configure_components
+    install_configure_components
 }
 
 main() {
+    log "CloudStack Installer Script Started"
     load_tracker
     validate_setup_pre_req
     configure_prerequisites
-    
     local temp_file=$(mktemp)
     dialog --backtitle "$SCRIPT_NAME" \
            --title "Installation Options" \
@@ -2192,25 +2392,21 @@ main() {
 
     if show_validation_summary; then
         if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]]; then
-            if select_zone_deployment; then
-                deploy_zone
-            else
-                dialog --backtitle "$SCRIPT_NAME" \
+            if is_interactive; then
+                if ! select_zone_deployment; then
+                    dialog --backtitle "$SCRIPT_NAME" \
                         --title "Zone Deployment" \
                         --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
+                else
+                    deploy_zone
+                fi
+            else
+                deploy_zone
             fi
         fi
     else
-        dialog --backtitle "$SCRIPT_NAME" \
-            --title "Warning" \
-            --msgbox "Zone deployment is not available until all components are properly configured." 8 60
+        show_dialog "msg" "Zone Deployment" "Warning: Some components are not properly configured.\n\nZone deployment is not available until all components are fixed." 5 10
     fi
-
-    # show dialog for script completion
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Installation Complete" \
-           --msgbox "CloudStack installation script has completed.\n\nCheck $CS_LOGFILE for details." 8 60
-    exit 0
     rm -f "$temp_file"
     cleanup 0 
 }
