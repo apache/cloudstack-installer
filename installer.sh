@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# c8k.in/stall.sh - Easiest Apache CloudStack Installer
+# c8k.in/installer.sh - Easiest Apache CloudStack Installer
 # Install with this command (from your Ubuntu/EL host):
 #
 # curl -sSfL https://c8k.in/stall.sh | bash
@@ -58,8 +58,7 @@ is_silent()      { (( !PROMPT )); }
 
 # Logging function
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$CS_LOGFILE"
-    # echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$CS_LOGFILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$CS_LOGFILE"
 }
 
 # Error handling function
@@ -291,108 +290,142 @@ normalize_repo_url_path() {
     echo "$url"
 }
 
+validate_repo_entry() {
+    local os_type="$1"
+    local entry="$2"
+
+    # Basic check: not empty
+    if [[ -z "$entry" ]]; then
+        error_exit "CloudStack Repository entry cannot be empty."
+        return 1
+    fi
+
+    # Debian/Ubuntu repo line example:
+    # deb [signed-by=...] https://download.cloudstack.org/ubuntu noble 4.20
+    if [[ "$os_type" =~ ^(ubuntu|debian)$ ]]; then
+        if [[ ! "$entry" =~ https?:// ]]; then
+            error_exit "Invalid Repository entry must include a valid URL (http or https)."
+            return 1
+        fi
+    fi
+
+    # RHEL-family example:
+    # https://download.cloudstack.org/centos/9/4.20/
+    if [[ "$os_type" =~ ^(rhel|centos|rocky|almalinux|ol)$ ]]; then
+        if [[ ! "$entry" =~ ^https?:// ]]; then
+            error_exit "Invalid Repository baseurl must start with http:// or https://."
+            return 1
+        fi
+    fi
+
+    # Optional: check version (warn, not fatal)
+    if [[ ! "$entry" =~ 4\.([1-9][0-9]) ]]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+               --title "Warning" \
+               --msgbox "The repository entry does not appear to contain a known CloudStack version (4.xx). Please verify before proceeding." 8 70
+    fi
+
+    return 0
+}
+
 configure_cloudstack_repo() {
     local repo_file=""
     local repo_entry=""
     case "$OS_TYPE" in
         ubuntu|debian)
             repo_file="/etc/apt/sources.list.d/cloudstack.list"
+            if [[ -f "$repo_file" ]]; then
+                repo_entry=$(grep -E '^deb ' "$repo_file" | sed -E 's/^.*] //')
+            fi
             ;;
         rhel|centos|ol|rocky|almalinux)
             repo_file="/etc/yum.repos.d/cloudstack.repo"
+            if [[ -f "$repo_file" ]]; then
+                repo_entry=$(grep -E '^baseurl=' "$repo_file" | cut -d'=' -f2-)
+            fi
             ;;
         *)
             dialog --msgbox "Unsupported OS: $OS_TYPE" 6 50
             exit 1
             ;;
     esac
-    if [[ -f "$repo_file" ]]; then
-        repo_entry=$(grep '^deb ' /etc/apt/sources.list.d/cloudstack.list | sed -E 's/^.*] //')
-        show_dialog \
-            "info" \
-            "CloudStack Repository Configuration" "CloudStack repository is configured already: \n\n$repo_entry"
-            set_tracker_field "repo_url" "$repo_entry"
+    # If repo already exists, show info and exit gracefully
+    if [[ -n "$repo_entry" ]]; then
+        show_dialog "info" \
+            "CloudStack Repository Configuration" \
+            "CloudStack repository is already configured:\n\n$repo_entry"
+
+        set_tracker_field "repo_url" "$repo_entry"
         return 0
     fi
 
-    local default_repo_url="https://download.cloudstack.org/"
-    local default_cs_version="4.20"
-    local repo_url cs_version
-    if is_interactive; then
-        local form_output
-        form_output=$(mktemp)
-        dialog --clear --form "Configure CloudStack Repository" 12 70 2 \
-            "Repo Base URL:" 1 1 "$default_repo_url" 1 20 50 0 \
-            "Version:"       2 1 "$default_cs_version"    2 20 50 0 \
-            2> "$form_output"
-
-        mapfile -t lines < "$form_output"
-        repo_url="${lines[0]}"
-        cs_version="${lines[1]}"
-        rm -f "$form_output"
-        if [[ -z "$repo_url" || -z "$cs_version" ]]; then
-            show_dialog \
-                "info" \
-                "CloudStack Repo Configuration" \
-                "Error: Repository Base URL and Version cannot be empty."
-            error_exit "Invalid repository configuration"
-        fi
-        if [[ ! "$cs_version" =~ ^4\.1[8-9]$|^4\.2[0-1]$ ]]; then
-            dialog --backtitle "$SCRIPT_NAME" \
-                --title "Error" \
-                --msgbox "Unsupported CloudStack version: $cs_version\nSupported versions are: 4.18, 4.19, 4.20, 4.21" 8 60
-            error_exit "Unsupported CloudStack version provided in repository configuration"
-        fi
-    else
-        repo_url="$default_repo_url"
-        cs_version="$default_cs_version"
-    fi
-    
-    repo_url="${repo_url%/}"  # Remove trailing slash if any
-    local repo_domain_url=$(echo "$repo_url" | sed -E 's#(https?://[^/]+)/.*#\1/#')
-    local gpg_url="${repo_domain_url}release.asc"
+    local default_repo_url="https://download.cloudstack.org"
+    local default_cs_version="4.21"
+    # Build default repo_entry depending on distro
     case "$OS_TYPE" in
         ubuntu|debian)
-            log "Configuring DEB repository for CloudStack version $cs_version from $repo_url"
             if [[ "$OS_TYPE" == "debian" ]]; then
                 UBUNTU_CODENAME=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
             else
                 UBUNTU_CODENAME="$VERSION_CODENAME"
             fi
-            if [[ "$repo_url" == *download.cloudstack.org* ]]; then
-                repo_url_entry=$(normalize_repo_url_path "$repo_url/ubuntu")
-                repo_entry="$repo_url_entry $UBUNTU_CODENAME $cs_version"
-            else
-                repo_url_entry=$(normalize_repo_url_path "$repo_url/$cs_version")
-                repo_entry="$repo_url_entry /"
-            fi
+            default_repo_entry="${default_repo_url}/ubuntu $VERSION_CODENAME $default_cs_version"
+            ;;
+        rhel|centos|ol|rocky|almalinux)
+            local repo_path
+            repo_path=$(determine_rpm_distro_version)
+            default_repo_entry="${default_repo_url}/${repo_path}/${default_cs_version}/"
+            ;;
+    esac
+
+    repo_entry="$default_repo_entry"
+    if is_interactive; then
+        width=60
+        prompt_text="Enter the CloudStack repository url:"
+        if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
+            prompt_text="Enter the CloudStack repository url.\n\nSupported formats:\n• Ubuntu-style (deb ... ubuntu codename version)\n• Flat layout (deb ... /)\nExample: deb [signed-by=...] http://packages.shapeblue.com/cloudstack/upstream/debian/4.21/ /"
+            width=90
+        fi
+        height=$(( $(echo -e "$prompt_text" | wc -l) + 8 ))
+        repo_entry=$(dialog --clear \
+            --backtitle "$SCRIPT_NAME" \
+            --title "Configure CloudStack Repository" \
+            --inputbox "$prompt_text" "$height" "$width" "$repo_entry" \
+            3>&1 1>&2 2>&3)
+        
+        validate_repo_entry "$OS_TYPE" "$repo_entry" || {
+            error_exit "Invalid repository entry provided by user."
+        }
+    fi
+
+    local repo_base_url=$(echo "$repo_entry" | sed -E 's|.*(https?://[^/ ]+).*|\1|')
+    local gpg_url="${repo_base_url}/release.asc"
+    if ! dialog --backtitle "$SCRIPT_NAME" \
+           --title "Confirm Repository" \
+           --yesno "The following CloudStack repository will be added:\n\n$repo_entry\n\nProceed?" 12 70; then
+        error_exit "CloudStack repository configuration cancelled by user."
+    fi
+           
+    log "Configuring CS repo: $repo_entry"
+    case "$OS_TYPE" in
+        ubuntu|debian)
             _configure_deb_repo "$gpg_url" "$repo_entry"
             ;;
         rhel|centos|ol|rocky|almalinux)
-            local repo_path=$(determine_rpm_distro_version)
-            local repo_url_entry=$(normalize_repo_url_path "$repo_url/$repo_path/$cs_version/")
-            _configure_rpm_repo "$gpg_url" "$repo_url_entry"
+            _configure_rpm_repo "$gpg_url" "$repo_entry"
             ;;
         *)
             dialog --msgbox "Unsupported OS: $OS_TYPE" 6 50
-            exit 1
+            error_exit "Unsupported OS: $OS_TYPE"
             ;;
     esac
-    log "Final DEB repo path: $repo_entry"
+    log "Configured CS repo: $repo_entry"
     set_tracker_field "repo_url" "$repo_entry"
 }
 
 _configure_deb_repo() {
     local gpg_key_url="$1"
     local repo_entry="$2"
-    dialog --backtitle "$SCRIPT_NAME" \
-           --title "Confirm Repository" \
-           --yesno "The following CloudStack repository will be added:\n\n$repo_entry\n\nProceed?" 12 70
-
-    if [[ $? -ne 0 ]]; then
-        error_exit "CloudStack repository configuration cancelled by user."
-    fi
-
     {
         echo "Configuring CloudStack repository..."
         echo "Adding CloudStack's signing key..."
@@ -414,14 +447,11 @@ _configure_deb_repo() {
                 --programbox "Configuring CloudStack repository..." 15 70
 }
 
-
 _configure_rpm_repo () {
     local gpg_key_url="$1"
     local repo_entry="$2"
     {
-        echo "20"
-        echo "# Adding CloudStack repository..."
-        
+        echo "Adding CloudStack repository..."
         if cat > /etc/yum.repos.d/cloudstack.repo <<EOF
 [cloudstack]
 name=CloudStack
@@ -431,13 +461,13 @@ gpgcheck=0
 gpgkey=$gpg_key_url
 EOF
         then
-            echo "# Repository added successfully"
+            echo "Repository added successfully"
         else
             error_exit "Failed to create CloudStack repository file"
         fi
     } | dialog --backtitle "$SCRIPT_NAME" \
             --title "Repository Configuration" \
-            --programbox "Configuring CloudStack repository..." 15 70 0
+            --programbox "Configuring CloudStack repository..." 15 70
 }
 
 determine_rpm_distro_version() {
@@ -648,6 +678,23 @@ install_mysql_server() {
         return 0
     fi
     install_with_progress "MySQL Server" "$package_name" "$tracker_key"
+    # Ensure MySQL service is running
+    if ! systemctl is-active --quiet "$MYSQL_SERVICE"; then
+        log "Starting $MYSQL_SERVICE service..."
+        {
+            echo "50"
+            echo "XXX"
+            echo "# Starting MySQL service..."
+            echo "XXX"
+        } | dialog --backtitle "$SCRIPT_NAME" --title "Installing MySQL" --gauge "Installing MySQL..." 15 70 0
+
+        systemctl enable --now "$MYSQL_SERVICE" >/dev/null 2>&1
+        if systemctl is-active --quiet "$MYSQL_SERVICE"; then
+            log "MySQL service started successfully."
+        else
+            error_exit "Failed to start MySQL service."
+        fi
+    fi
 }
 
 install_with_progress() {
@@ -691,20 +738,26 @@ install_with_progress() {
 
         while kill -0 "$INSTALL_PID" 2>/dev/null; do
             local tail_output
-            tail_output=$(tail -n 5 "$TMP_LOG" | strip_ansi | tr '\n' ' ' | cut -c -300)
+            tail_output=$(tail -n 5 "$TMP_LOG" | strip_ansi | tr -d '\r')
+            
+            # Add left padding, truncate width, and wrap safely
+            tail_output=$(echo "$tail_output" \
+            | sed 's/^/   /' \
+            | fold -s -w 70 \
+            | tail -n 5)
 
             echo "$percent"
             echo "XXX"
             echo "# $start_msg"
-            echo "#"
-            echo "# $tail_output"
+            echo
+            echo "$tail_output"
             echo "XXX"
 
             percent=$((percent + 1))
             [ $percent -gt 90 ] && percent=90
             sleep 1
         done
-    } | dialog --backtitle "$SCRIPT_NAME" --title "$title Installation" --gauge "Installing $title..." 15 70 0
+    } | dialog --backtitle "$SCRIPT_NAME" --title "$title Installation" --gauge "Installing $title..." 15 90 0
 
     wait "$INSTALL_PID"
     local status=$?
@@ -790,7 +843,7 @@ show_components_versions() {
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy nfs-kernel-server 2>/dev/null | awk '/Candidate:/ {print $2}')
                 elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
-                    version_info=$($PACKAGE_MANAGER info nfs-utils 2>/dev/null | awk '/Version     :/ {print $3}')
+                    version_info=$($PACKAGE_MANAGER info nfs-utils 2>/dev/null | awk -F':' '/Version/ {gsub(/ /,"",$2); print $2}')
                 fi
                 versions+=("NFS Server: ${version_info:-Not Available}\n")
                 ;;
@@ -799,7 +852,7 @@ show_components_versions() {
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy mysql-server 2>/dev/null | awk '/Candidate:/ {print $2}')
                 elif [[ "$PACKAGE_MANAGER" == "dnf" || "$PACKAGE_MANAGER" == "yum" ]]; then
-                    version_info=$($PACKAGE_MANAGER info mysql-server 2>/dev/null | awk '/Version     :/ {print $3}')
+                    version_info=$($PACKAGE_MANAGER info mysql-server 2>/dev/null | awk -F':' '/Version/ {gsub(/ /,"",$2); print $2}')
                 fi
                 versions+=("MySQL Server: ${version_info:-Not Available}\n")
                 ;;
@@ -808,7 +861,7 @@ show_components_versions() {
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy cloudstack-management 2>/dev/null | awk '/Candidate:/ {print $2}')
                 elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
-                    version_info=$($PACKAGE_MANAGER info cloudstack-management 2>/dev/null | awk '/Version     :/ {print $3}')
+                    version_info=$($PACKAGE_MANAGER info cloudstack-management 2>/dev/null | awk -F':' '/Version/ {gsub(/ /,"",$2); print $2}')
                 fi
                 versions+=("CloudStack Management Server: ${version_info:-Not Available}\n")
                 ;;
@@ -817,7 +870,7 @@ show_components_versions() {
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy cloudstack-agent 2>/dev/null | awk '/Candidate:/ {print $2}')
                 elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
-                    version_info=$($PACKAGE_MANAGER info cloudstack-agent 2>/dev/null | awk '/Version     :/ {print $3}')
+                    version_info=$($PACKAGE_MANAGER info cloudstack-agent 2>/dev/null | awk -F':' '/Version/ {gsub(/ /,"",$2); print $2}')
                 fi
                 versions+=("CloudStack KVM Agent: ${version_info:-Not Available}\n")
                 ;;
@@ -826,7 +879,7 @@ show_components_versions() {
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
                     version_info=$(apt-cache policy cloudstack-usage 2>/dev/null | awk '/Candidate:/ {print $2}')
                 elif [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
-                    version_info=$($PACKAGE_MANAGER info cloudstack-usage 2>/dev/null | awk '/Version     :/ {print $3}')
+                    version_info=$($PACKAGE_MANAGER info cloudstack-usage 2>/dev/null | awk -F':' '/Version/ {gsub(/ /,"",$2); print $2}')
                 fi
                 versions+=("CloudStack Usage Server: ${version_info:-Not Available}\n")
                 ;;
@@ -919,16 +972,21 @@ configure_nfs_server() {
         return 0
     fi
     log "Starting NFS storage configuration..."
-    if grep -q "^/export " /etc/exports; then
+
+    if [[ -d "/export" ]] && grep -q "^/export " /etc/exports; then
         show_dialog "info" "$title" "NFS is already configured. Skipping setup."
+        set_tracker_field "$tracker_key" "yes"
         return 0
-        set_tracker_field $tracker_key "yes"
     fi
 
-    local export_cidr=$(get_export_cidr)
+    local export_cidr
+    export_cidr=$(get_export_cidr)
     # Step 1: Create exports and directories
-    echo "/export  ${export_cidr}(rw,async,no_root_squash,no_subtree_check)" >> /etc/exports
     mkdir -p /export/primary /export/secondary
+    if ! grep -q "^/export " /etc/exports; then
+        echo "/export  ${export_cidr}(rw,async,no_root_squash,no_subtree_check)" >> /etc/exports
+    fi
+
     exportfs -a
 
     # Step 2: Configure ports and services based on distro
@@ -1109,7 +1167,7 @@ configure_kvm_agent() {
                 echo "$key = ${libvirt_settings[$key]}" >> "$LIBVIRT_CONF"
             fi
         done
-        
+
         echo "XXX"
         echo "60"
         echo "Configuring libvirt sockets..."
@@ -2007,11 +2065,12 @@ setup_repo() {
         return 0
     fi
     configure_cloudstack_repo
+    update_system
 }
 
 install_configure_mgmt() {
-    install_management_server
     install_mysql_server
+    install_management_server
     configure_mysql_for_cloudstack
     setup_management_server_database
 }
@@ -2162,7 +2221,6 @@ show_validation_summary() {
 configure_prerequisites() {
     setup_network
     setup_repo
-    update_system
 }
 
 validate_setup_pre_req() {
@@ -2202,7 +2260,7 @@ main() {
     local temp_file=$(mktemp)
     dialog --backtitle "$SCRIPT_NAME" \
            --title "Installation Options" \
-           --menu "Select an option:" 15 60 4 \
+           --menu "Select an option:" 12 50 4 \
            1 "All-in-One Installation" \
            2 "Custom Installation" \
            3 "Configure CloudStack Repository" \
