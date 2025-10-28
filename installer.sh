@@ -36,8 +36,6 @@ ZONE_TYPE=""
 MYSQL_SERVICE=""
 MYSQL_CONF_DIR=""
 
-CS_VERSION=4.20
-INTERFACE=
 BRIDGE=cloudbr0
 HOST_IP=
 GATEWAY=
@@ -364,12 +362,11 @@ configure_cloudstack_repo() {
     # Build default repo_entry depending on distro
     case "$OS_TYPE" in
         ubuntu|debian)
+            local ubuntu_codename="$VERSION_CODENAME"
             if [[ "$OS_TYPE" == "debian" ]]; then
-                UBUNTU_CODENAME=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
-            else
-                UBUNTU_CODENAME="$VERSION_CODENAME"
+                ubuntu_codename=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
             fi
-            default_repo_entry="${default_repo_url}/ubuntu $VERSION_CODENAME $default_cs_version"
+            default_repo_entry="${default_repo_url}/ubuntu $ubuntu_codename $default_cs_version"
             ;;
         rhel|centos|ol|rocky|almalinux)
             local repo_path
@@ -630,7 +627,7 @@ install_management_server() {
 install_usage_server() {
     local package_name="cloudstack-usage"
     local tracker_key="usage_installed"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "CloudStack Usage Server is already installed. Skipping installation."
         return 0
     fi
@@ -652,7 +649,7 @@ install_usage_server() {
 install_kvm_agent() {
     local package_name="cloudstack-agent"
     local tracker_key="agent_installed"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "KVM Agent is already installed. Skipping installation."
         return 0
     fi
@@ -667,7 +664,7 @@ install_kvm_agent() {
 install_mysql_server() {
     local package_name="mysql-server"
     local tracker_key="mysql_installed"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "MySQL is already installed. Skipping installation."
         return 0
     fi
@@ -776,7 +773,7 @@ install_with_progress() {
 # Function to install NFS Server
 install_nfs_server() {
     local tracker_key="nfs_installed"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "NFS Server is already installed. Skipping installation."
         show_dialog "info" "NFS Server Installation" "NFS Server is already installed. Skipping installation."
         return 0
@@ -784,7 +781,7 @@ install_nfs_server() {
 
     if command -v exportfs &>/dev/null; then
         log "NFS Server is already installed."
-        set_tracker_field $tracker_key "yes"
+        set_tracker_field "$tracker_key" "yes"
         show_dialog "info" "NFS Server Installation" "NFS Server is already installed. Skipping installation."
         return 0
     fi
@@ -890,7 +887,7 @@ show_components_versions() {
 
 configure_mysql_for_cloudstack() {
     local tracker_key="mysql_configured"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "MySQL is already configured for CloudStack. Skipping configuration."
         return 0
     fi
@@ -905,7 +902,7 @@ configure_mysql_for_cloudstack() {
     local config_file="$MYSQL_CONF_DIR/cloudstack.cnf"
     if [[ -f "$config_file" ]]; then
         show_dialog "info" "$title" "Configuration already exists at:\n$config_file\nSkipping MySQL setup."
-        set_tracker_field $tracker_key "yes"
+        set_tracker_field "$tracker_key" "yes"
         return 0
     fi
 
@@ -937,7 +934,7 @@ EOF
     systemctl restart $MYSQL_SERVICE && \
     show_dialog "info" "$title" "MySQL has been configured and restarted successfully."|| \
     show_dialog "info" "$title" "Failed to restart MySQL. Please check the service manually."
-    set_tracker_field $tracker_key "yes"
+    set_tracker_field "$tracker_key" "yes"
 }
 
 get_local_cidr() {
@@ -967,7 +964,7 @@ get_export_cidr() {
 configure_nfs_server() {
     local tracker_key="nfs_configured"
     local title="NFS Storage Configuration"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "NFS storage is already configured. Skipping setup."
         return 0
     fi
@@ -1030,7 +1027,7 @@ EOF
   if [[ $SERVICE_STATUS -eq 0 ]]; then
     exports_list=$(exportfs)
     show_dialog "info" "$title" "NFS Server configured and restarted successfully.\n\nCurrent exports:\n$exports_list"
-    set_tracker_field $tracker_key "yes"
+    set_tracker_field "$tracker_key" "yes"
     log "NFS server configured successfully."
   else
     show_dialog "info" "$title" "Failed to restart NFS server. Please check the service logs."
@@ -1040,7 +1037,7 @@ EOF
 setup_management_server_database() {
     local title="CloudStack Database Deployment"
     local tracker_key="db_deployed"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "CloudStack database is already deployed. Skipping deployment."
         return 0
     fi
@@ -1057,7 +1054,7 @@ setup_management_server_database() {
             local current_db_host=$(grep "^cluster.node.IP" /etc/cloudstack/management/db.properties | cut -d= -f2)
             if ! dialog --title "Info" --yesno "CloudStack database appears to be already configured.\nCurrent database host: $current_db_host\n\nDo you want to reconfigure it?" 10 60; then
                 show_dialog "info" "$title" "Skipping database configuration."
-                set_tracker_field $tracker_key "yes"
+                set_tracker_field "$tracker_key" "yes"
                 return 0
             fi
         fi
@@ -1107,14 +1104,14 @@ setup_management_server_database() {
                --gauge "Starting management server setup..." 10 70 0
 
     sleep 5
-    set_tracker_field $tracker_key "yes"
+    set_tracker_field "$tracker_key" "yes"
     show_dialog "info" "CloudStack Configuration" "CloudStack Management Server has been configured."
 }
 
 configure_kvm_agent() {
     local tracker_key="agent_configured"
     local title="KVM Host Configuration"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "KVM Agent is already configured. Skipping configuration."
         return 0
     fi
@@ -1306,13 +1303,13 @@ configure_kvm_agent() {
     if ! systemctl is-active --quiet libvirtd; then
         show_dialog "msg" "$title" "Libvirt service is not running! Please check system logs."
     fi
-    set_tracker_field $tracker_key "yes"
+    set_tracker_field "$tracker_key" "yes"
 }
 
 configure_usage_server() {
     log "Configuring CloudStack Usage Server..."
     local tracker_key="usage_configured"
-    if is_configured $tracker_key; then
+    if is_configured "$tracker_key"; then
         log "Usage Server is already configured. Skipping configuration."
         return 0
     fi
@@ -1853,15 +1850,6 @@ show_dialog() {
                     --title "$title" \
                     --msgbox "$msg" $height $width
             return 0
-            ;;
-        confirm)
-            dialog --backtitle "$SCRIPT_NAME" \
-                    --title "$title" \
-                    --yesno "$msg" $height $width
-            if [[ $? -ne 0 ]]; then
-                return 0
-            fi
-            return 1
             ;;
         *)
             echo "Unknown mode: $mode"
