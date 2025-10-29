@@ -2,7 +2,7 @@
 # c8k.in/installer.sh - Easiest Apache CloudStack Installer
 # Install with this command (from your Ubuntu/EL host):
 #
-# curl -sSfL https://c8k.in/stall.sh | bash
+# curl -sSfL https://c8k.in/installer.sh | bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -21,12 +21,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
-
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Global variables
-SCRIPT_NAME="CloudStack Installer"
-CS_LOGFILE="/tmp/cloudstack-install.log"
+SCRIPT_NAME="Apache CloudStack Installer"
+CS_LOGDIR="/var/log/cloudstack/installer"
+CS_LOGFILE="${CS_LOGDIR}/cloudstack-installer.log"
 TRACKER_FILE="$HOME/cloudstack-installer-tracker.conf"
 
 OS_TYPE=""
@@ -83,7 +83,6 @@ info_msg() {
     echo -e "${BLUE}INFO: $1${NC}"
     log "INFO: $1"
 }
-
 
 declare -A tracker_values
 
@@ -587,7 +586,6 @@ is_package_installed() {
     return 0  # all packages installed
 }
 
-
 install_package() {
     local packages=("$@")  # Capture all arguments (1..N)
 
@@ -604,8 +602,6 @@ install_package() {
             ;;
     esac
 }
-
-
 
 # Function to install CloudStack Management Server
 install_management_server() {
@@ -942,7 +938,6 @@ get_local_cidr() {
   echo "$local_ip"  # e.g., 10.1.1.53/24
 }
 
-
 get_export_cidr() {
   ip_cidr=$(get_local_cidr)
   # Convert from 10.1.1.53/24 → 10.1.1.0/24
@@ -958,8 +953,6 @@ get_export_cidr() {
   fi
   echo "$network"
 }
-
-
 
 configure_nfs_server() {
     local tracker_key="nfs_configured"
@@ -1034,7 +1027,7 @@ EOF
   fi
 }
 
-setup_management_server_database() {
+configure_management_server_database() {
     local title="CloudStack Database Deployment"
     local tracker_key="db_deployed"
     if is_configured "$tracker_key"; then
@@ -2053,14 +2046,13 @@ setup_repo() {
         return 0
     fi
     configure_cloudstack_repo
-    update_system
 }
 
 install_configure_mgmt() {
     install_mysql_server
     install_management_server
     configure_mysql_for_cloudstack
-    setup_management_server_database
+    configure_management_server_database
 }
 
 install_configure_agent() {
@@ -2205,10 +2197,10 @@ show_validation_summary() {
     fi
 }
 
-
 configure_prerequisites() {
     setup_network
     setup_repo
+    update_system
 }
 
 validate_setup_pre_req() {
@@ -2237,7 +2229,6 @@ all_in_one_box() {
                --msgbox "Installation cancelled by user." 6 60
         exit 0
     fi
-
 }
 
 main() {
@@ -2312,4 +2303,5 @@ cleanup() {
 trap 'cleanup 1' INT TERM
 
 # Run main function
+mkdir -p $CS_LOGDIR
 main "$@"
