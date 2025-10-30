@@ -335,7 +335,7 @@ update_system_packages() {
                 dnf update -y 2>&1 | while IFS= read -r line; do
                     percent=$((percent + 1))
                     [ $percent -gt 90 ] && percent=90
-                    update_progress_bar "75" echo "# Installing system updates...\n\n$line"
+                    update_progress_bar "75" "# Installing system updates...\n\n$line"
                 done
                 ;;
         esac
@@ -344,7 +344,7 @@ update_system_packages() {
         sleep 2
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "System Update" \
-               --gauge "Updating system packages..." 15 70 0
+               --gauge "Updating system packages..." 15 80 0
 
     # Verify update success
     if [[ $? -eq 0 ]]; then
@@ -442,7 +442,7 @@ install_pkg_with_progress_bar() {
             # Add left padding, truncate width, and wrap safely
             tail_output=$(echo "$tail_output" \
             | sed 's/^/   /' \
-            | fold -s -w 75 \
+            | fold -s -w 80 \
             | tail -n 5)
 
             echo "$percent"
@@ -456,7 +456,7 @@ install_pkg_with_progress_bar() {
             [ $percent -gt 90 ] && percent=90
             sleep 1
         done
-    } | dialog --backtitle "$SCRIPT_NAME" --title "$title Installation" --gauge "Installing $title..." 15 75 0
+    } | dialog --backtitle "$SCRIPT_NAME" --title "$title Installation" --gauge "Installing $title..." 15 80 0
 
     wait "$INSTALL_PID"
     local status=$?
@@ -511,6 +511,44 @@ show_dialog() {
             ;;
     esac
 }
+
+# Attempts to start service_name
+start_service_with_progress() {
+    local service_name="$1"
+    local display_name="${2:-$service_name}"
+    local start_percent="${3:-60}"
+    local end_percent="${4:-90}"
+
+    if ! systemctl is-active --quiet "$service_name"; then
+        {
+            update_progress_bar "$start_percent" "# Starting $display_name service..."
+            systemctl start "$service_name" >/dev/null 2>&1 &
+            local pid=$!
+
+            local i
+            for ((i=start_percent; i<=end_percent; i++)); do
+                update_progress_bar "$i" "# Waiting for $display_name to start..."
+                sleep 0.2
+            done
+
+            wait "$pid"
+            update_progress_bar "$end_percent" "# $display_name service started successfully."
+            sleep 1
+        } | dialog --backtitle "$SCRIPT_NAME" \
+                   --title "Starting $display_name Service" \
+                   --gauge "Starting $display_name service..." 15 70 0
+
+        systemctl enable "$service_name" >/dev/null 2>&1
+        if systemctl is-active --quiet "$service_name"; then
+            log "$display_name service started successfully."
+        else
+            error_exit "Failed to start $display_name service."
+        fi
+    else
+        log "$display_name service is already running."
+    fi
+}
+
 
 # CloudStack Banner gets displayed at the end of Zone Deployment
 show_cloudstack_banner() {
@@ -620,6 +658,7 @@ EOF
 
 configure_cloudstack_repo() {
     local title="CloudStack Repository Configuration"
+    local tracker_key="repo_url"
     local repo_file=""
     local repo_entry=""
     case "$OS_TYPE" in
@@ -647,7 +686,7 @@ configure_cloudstack_repo() {
             show_dialog "info" \
             "$title" \
             "CloudStack repository is already configured:\n\n$repo_entry"
-            set_tracker_field "repo_url" "$repo_entry"
+            set_tracker_field "$tracker_key" "$repo_entry"
             return 0
         fi
         
@@ -657,8 +696,8 @@ configure_cloudstack_repo() {
                --yesno "CloudStack repository is already configured:\n\n$repo_entry\n\nDo you want to reconfigure it?" 12 70; then
                 log "User opted to reconfigure existing CloudStack repository."
             else
-                show_dialog "info" $title "Skipping CloudStack repository configuration."
-                set_tracker_field "repo_url" "$repo_entry"
+                show_dialog "info" "$title" "Skipping CloudStack repository configuration."
+                set_tracker_field "$tracker_key" "$repo_entry"
                 return 0
             fi
         fi
@@ -728,7 +767,7 @@ configure_cloudstack_repo() {
             ;;
     esac
     log "Configured CS repo: $repo_entry"
-    set_tracker_field "repo_url" "$repo_entry"
+    set_tracker_field "$tracker_key" "$repo_entry"
 }
 
 
@@ -784,7 +823,7 @@ install_base_dependencies() {
             # Add left padding, truncate width, and wrap safely
             tail_output=$(echo "$tail_output" \
             | sed 's/^/   /' \
-            | fold -s -w 75 \
+            | fold -s -w 80 \
             | tail -n 5)
             update_progress_bar "$PERCENT" "$title\n\n$tail_output"
             PERCENT=$((PERCENT + 1))
@@ -796,7 +835,7 @@ install_base_dependencies() {
         update_progress_bar "100" "Base dependencies installed successfully"
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Installing Dependencies" \
-               --gauge "Preparing system..." 15 75 0 
+               --gauge "Preparing system..." 15 80 0 
     show_dialog "info" "Dependencies Installation" "All Base dependencies installed successfully"
     log "Base dependencies installed successfully"
     
@@ -966,30 +1005,7 @@ install_mysql_server() {
         return 0
     fi
     install_pkg_with_progress_bar "MySQL Server" "$package_name" "$tracker_key"
-    # Ensure MySQL service is running
-    if ! systemctl is-active --quiet "$MYSQL_SERVICE"; then
-        {
-            update_progress_bar 60 "# Starting MySQL service..."
-            systemctl start "$MYSQL_SERVICE" >/dev/null 2>&1 &
-            pid=$!
-            for i in {60..85}; do
-                update_progress_bar "$i" "# Waiting for MySQL to start..."
-                sleep 0.2
-            done
-            wait $pid
-            update_progress_bar 90 "# MySQL service started successfully."
-            sleep 1
-        } | dialog --backtitle "$SCRIPT_NAME" \
-                --title "Installing MySQL" \
-                --gauge "Installing MySQL..." 15 70 0
-
-        systemctl enable "$MYSQL_SERVICE" >/dev/null 2>&1
-        if systemctl is-active --quiet "$MYSQL_SERVICE"; then
-            log "MySQL service started successfully."
-        else
-            error_exit "Failed to start MySQL service."
-        fi
-    fi
+    start_service_with_progress "$MYSQL_SERVICE" "MySQL" 60 90
 }
 
 configure_mysql_for_cloudstack() {
@@ -1374,6 +1390,7 @@ install_usage_server() {
     fi
 
     install_pkg_with_progress_bar "CloudStack Usage Server" "$package_name" "$tracker_key"
+    start_service_with_progress "$package_name" "CloudStack Usage" 60 90
 }
 
 configure_usage_server() {
@@ -2279,7 +2296,6 @@ main() {
 }
 
 # Set trap for cleanup
-trap 'cleanup $?' EXIT
 trap 'cleanup 1' INT TERM
 
 # Ensure log directory exists
