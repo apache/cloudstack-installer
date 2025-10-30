@@ -303,54 +303,44 @@ validate_repo_entry() {
 
 # Update system packages once repository is configured
 update_system_packages() {
+    local percent=1
     {
-        echo "10"
-        echo "# Updating package cache..."
         case "$PACKAGE_MANAGER" in
             apt)
                 apt-get update 2>&1 | while IFS= read -r line; do
-                    echo "XXX"
-                    echo "30"
-                    echo "# Updating package lists...\n\n$line"
-                    echo "XXX"
+                    percent=$((percent + 1))
+                    [ $percent -gt 50 ] && percent=50
+                    update_progress_bar "$percent" "# Updating package lists...\n\n$line"
                 done
 
-                echo "# Installing system updates..."
                 apt-get upgrade -y 2>&1 | while IFS= read -r line; do
-                    echo "XXX"
-                    echo "75"
-                    echo "# Installing updates...\n\n$line"
-                    echo "XXX"
+                    percent=$((percent + 1))
+                    [ $percent -gt 90 ] && percent=90
+                    update_progress_bar "$percent" "# Installing updates...\n\n$line"
                 done
                 ;;
             dnf)
                 dnf clean all 2>&1 | while IFS= read -r line; do
-                    echo "XXX"
-                    echo "20"
-                    echo "# Cleaning package cache...\n\n$line"
-                    echo "XXX"
+                    percent=$((percent + 1))
+                    [ $percent -gt 20 ] && percent=20
+                    update_progress_bar "$percent" "# Cleaning package cache...\n\n$line"
                 done
 
                 dnf makecache 2>&1 | while IFS= read -r line; do
-                    echo "XXX"
-                    echo "40"
-                    echo "# Updating package cache...\n\n$line"
-                    echo "XXX"
+                    percent=$((percent + 1))
+                    [ $percent -gt 70 ] && percent=70
+                    update_progress_bar "40" "# Updating package cache...\n\n$line"
                 done
 
                 dnf update -y 2>&1 | while IFS= read -r line; do
-                    echo "XXX"
-                    echo "75"
-                    echo "# Installing system updates...\n\n$line"
-                    echo "XXX"
+                    percent=$((percent + 1))
+                    [ $percent -gt 90 ] && percent=90
+                    update_progress_bar "75" echo "# Installing system updates...\n\n$line"
                 done
                 ;;
         esac
 
-        echo "XXX"
-        echo "100"
-        echo "# System update complete!"
-        echo "XXX"
+        update_progress_bar "100" "# System update complete!"
         sleep 2
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "System Update" \
@@ -443,10 +433,7 @@ install_pkg_with_progress_bar() {
     local start_msg="Installing $title..."
 
     {
-        echo "$percent"
-        echo "XXX"
-        echo "# $start_msg"
-        echo "XXX"
+        update_progress_bar "$percent" "# $start_msg"
 
         while kill -0 "$INSTALL_PID" 2>/dev/null; do
             local tail_output
@@ -455,7 +442,7 @@ install_pkg_with_progress_bar() {
             # Add left padding, truncate width, and wrap safely
             tail_output=$(echo "$tail_output" \
             | sed 's/^/   /' \
-            | fold -s -w 70 \
+            | fold -s -w 75 \
             | tail -n 5)
 
             echo "$percent"
@@ -469,7 +456,7 @@ install_pkg_with_progress_bar() {
             [ $percent -gt 90 ] && percent=90
             sleep 1
         done
-    } | dialog --backtitle "$SCRIPT_NAME" --title "$title Installation" --gauge "Installing $title..." 15 90 0
+    } | dialog --backtitle "$SCRIPT_NAME" --title "$title Installation" --gauge "Installing $title..." 15 75 0
 
     wait "$INSTALL_PID"
     local status=$?
@@ -485,7 +472,17 @@ install_pkg_with_progress_bar() {
     fi
 }
 
-# Dialog utility to display info or message
+# function to update progress bar in the dialog
+update_progress_bar() {
+    local percent="$1"
+    local msg="$2"
+    echo "XXX"
+    echo "$percent"
+    echo -e "$msg"
+    echo "XXX"
+}
+
+# utility function to display dialog for info or message purpose
 show_dialog() {
     local mode="$1"
     local title="$2"
@@ -622,6 +619,7 @@ EOF
 }
 
 configure_cloudstack_repo() {
+    local title="CloudStack Repository Configuration"
     local repo_file=""
     local repo_entry=""
     case "$OS_TYPE" in
@@ -642,35 +640,53 @@ configure_cloudstack_repo() {
             exit 1
             ;;
     esac
-    # If repo already exists, show info and exit gracefully
+    # If repo already exists, show info and exit gracefully for silent mode
+    # allow reconfiguration for interactive mode
     if [[ -n "$repo_entry" ]]; then
-        show_dialog "info" \
-            "CloudStack Repository Configuration" \
+        if is_silent; then
+            show_dialog "info" \
+            "$title" \
             "CloudStack repository is already configured:\n\n$repo_entry"
-
-        set_tracker_field "repo_url" "$repo_entry"
-        return 0
+            set_tracker_field "repo_url" "$repo_entry"
+            return 0
+        fi
+        
+        if is_interactive; then
+            if dialog --backtitle "$SCRIPT_NAME" \
+               --title "$title" \
+               --yesno "CloudStack repository is already configured:\n\n$repo_entry\n\nDo you want to reconfigure it?" 12 70; then
+                log "User opted to reconfigure existing CloudStack repository."
+            else
+                show_dialog "info" $title "Skipping CloudStack repository configuration."
+                set_tracker_field "repo_url" "$repo_entry"
+                return 0
+            fi
+        fi
     fi
 
-    local default_repo_url="https://download.cloudstack.org"
-    local default_cs_version="4.21"
-    # Build default repo_entry depending on distro
-    case "$OS_TYPE" in
-        ubuntu|debian)
-            local ubuntu_codename="$VERSION_CODENAME"
-            if [[ "$OS_TYPE" == "debian" ]]; then
-                ubuntu_codename=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
-            fi
-            default_repo_entry="${default_repo_url}/ubuntu $ubuntu_codename $default_cs_version"
-            ;;
-        rhel|centos|ol|rocky|almalinux)
-            local repo_path
-            repo_path=$(determine_rpm_distro_version)
-            default_repo_entry="${default_repo_url}/${repo_path}/${default_cs_version}/"
-            ;;
-    esac
+    # default repo_entry is required if repo_entry is not set
+    if [[ -z "$repo_entry" ]]; then
+        # Set default repo_entry based on OS
+        local default_repo_url="https://download.cloudstack.org"
+        local default_cs_version="4.21"
+        # Build default repo_entry depending on distro
+        case "$OS_TYPE" in
+            ubuntu|debian)
+                local ubuntu_codename="$VERSION_CODENAME"
+                if [[ "$OS_TYPE" == "debian" ]]; then
+                    ubuntu_codename=$(get_ubuntu_codename_for_debian "$VERSION_CODENAME") || exit 1
+                fi
+                default_repo_entry="${default_repo_url}/ubuntu $ubuntu_codename $default_cs_version"
+                ;;
+            rhel|centos|ol|rocky|almalinux)
+                local repo_path
+                repo_path=$(determine_rpm_distro_version)
+                default_repo_entry="${default_repo_url}/${repo_path}/${default_cs_version}/"
+                ;;
+        esac
+        repo_entry="$default_repo_entry"
+    fi
 
-    repo_entry="$default_repo_entry"
     if is_interactive; then
         width=60
         prompt_text="Enter the CloudStack repository url:"
@@ -750,12 +766,7 @@ install_base_dependencies() {
     TMP_LOG=$(mktemp /tmp/install_base.XXXXXX.log)
     title="Installing base dependencies (qemu-kvm, python, curl, etc.)..."
     {   
-        echo "XXX"
-        echo "30"
-        echo $title
-        echo "XXX"
-
-        PERCENT=31
+        update_progress_bar "30" "$title"
         case "$PACKAGE_MANAGER" in
             apt)
                 DEBIAN_FRONTEND=noninteractive \
@@ -769,27 +780,20 @@ install_base_dependencies() {
         INSTALL_PID=$!
         PERCENT=31
         while kill -0 "$INSTALL_PID" 2>/dev/null; do
-            echo "XXX"
-            echo "$PERCENT"
             tail_output=$(tail -n 5 "$TMP_LOG" | strip_ansi | tr -d '\r')
             # Add left padding, truncate width, and wrap safely
             tail_output=$(echo "$tail_output" \
             | sed 's/^/   /' \
             | fold -s -w 75 \
             | tail -n 5)
-            echo "$title\n\n$tail_output"
-            echo "XXX"
+            update_progress_bar "$PERCENT" "$title\n\n$tail_output"
             PERCENT=$((PERCENT + 1))
             [ "$PERCENT" -ge 90 ] && PERCENT=90
             sleep 1
         done
 
         wait "$INSTALL_PID" || error_exit "Base dependency installation failed"
-        echo "XXX"
-        echo "100"
-        echo "Base dependencies installed successfully"
-        echo "XXX"
-
+        update_progress_bar "100" "Base dependencies installed successfully"
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Installing Dependencies" \
                --gauge "Preparing system..." 15 75 0 
@@ -925,10 +929,7 @@ configure_management_server_database() {
         cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root: -i "$cloudbr0_ip" 2>&1 | \
             while IFS= read -r line; do
                 msg=$(echo "$line" | strip_ansi)
-                echo "XXX"
-                echo "50"
-                echo "Deploying CloudStack Database...\n\n$msg"
-                echo "XXX"
+                update_progress_bar "50" "Deploying CloudStack Database...\n\n$msg"
             done
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "$title" \
@@ -939,10 +940,7 @@ configure_management_server_database() {
         cloudstack-setup-management 2>&1 | \
             while IFS= read -r line; do
                 msg=$(echo "$line" | strip_ansi)
-                echo "XXX"
-                echo "75"
-                echo "Deploying Management Server...\n\n$msg"
-                echo "XXX"
+                update_progress_bar "75" "Deploying Management Server...\n\n$msg"
             done
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Management Server Setup" \
@@ -970,15 +968,22 @@ install_mysql_server() {
     install_pkg_with_progress_bar "MySQL Server" "$package_name" "$tracker_key"
     # Ensure MySQL service is running
     if ! systemctl is-active --quiet "$MYSQL_SERVICE"; then
-        log "Starting $MYSQL_SERVICE service..."
         {
-            echo "50"
-            echo "XXX"
-            echo "# Starting MySQL service..."
-            echo "XXX"
-        } | dialog --backtitle "$SCRIPT_NAME" --title "Installing MySQL" --gauge "Installing MySQL..." 15 70 0
+            update_progress_bar 60 "# Starting MySQL service..."
+            systemctl start "$MYSQL_SERVICE" >/dev/null 2>&1 &
+            pid=$!
+            for i in {60..85}; do
+                update_progress_bar "$i" "# Waiting for MySQL to start..."
+                sleep 0.2
+            done
+            wait $pid
+            update_progress_bar 90 "# MySQL service started successfully."
+            sleep 1
+        } | dialog --backtitle "$SCRIPT_NAME" \
+                --title "Installing MySQL" \
+                --gauge "Installing MySQL..." 15 70 0
 
-        systemctl enable --now "$MYSQL_SERVICE" >/dev/null 2>&1
+        systemctl enable "$MYSQL_SERVICE" >/dev/null 2>&1
         if systemctl is-active --quiet "$MYSQL_SERVICE"; then
             log "MySQL service started successfully."
         else
@@ -1191,15 +1196,9 @@ configure_kvm_agent() {
 
     # Configure VNC
     {
-        echo "XXX"
-        echo "10"
-        echo "Configuring VNC access..."
-        echo "XXX"
+        update_progress_bar "10"  "Configuring VNC access..."
         if sed -i -e 's/\#vnc_listen.*$/vnc_listen = "0.0.0.0"/g' /etc/libvirt/qemu.conf; then
-            echo "XXX"
-            echo "25"
-            echo "VNC configuration successful"
-            echo "XXX"
+            update_progress_bar "25" "VNC configuration successful"
         else
             error_exit "Failed to configure VNC"
         fi
@@ -1212,10 +1211,7 @@ configure_kvm_agent() {
             echo 'remote_mode="legacy"' >> /etc/libvirt/libvirtd.conf
         fi
 
-        echo "XXX"
-        echo "40"
-        echo "Setting up libvirt TCP access..."
-        echo "XXX"
+        update_progress_bar "40" "Setting up libvirt TCP access..."
         LIBVIRT_CONF="/etc/libvirt/libvirtd.conf"
         declare -A libvirt_settings=(
             ["listen_tcp"]="1"
@@ -1236,20 +1232,14 @@ configure_kvm_agent() {
             fi
         done
 
-        echo "XXX"
-        echo "60"
-        echo "Configuring libvirt sockets..."
-        echo "XXX"
+        update_progress_bar "60" "Configuring libvirt sockets..."
         systemctl mask libvirtd.socket \
             libvirtd-ro.socket \
             libvirtd-admin.socket \
             libvirtd-tls.socket \
             libvirtd-tcp.socket &>/dev/null
 
-        echo "XXX"
-        echo "75"
-        echo "Configuring security policies..."
-        echo "XXX"
+        update_progress_bar "75" "Configuring security policies..."
         case "$OS_TYPE" in
             ubuntu|debian)
                 echo "# Configuring AppArmor..."
@@ -1266,10 +1256,7 @@ configure_kvm_agent() {
                                 ln -sf "$profile" "/etc/apparmor.d/disable/" 2>/dev/null
                                 if [[ -f "$profile" ]]; then
                                     if ! apparmor_parser -R "$profile" 2>/dev/null; then
-                                        echo "XXX"
-                                        echo "80"
-                                        echo "# Warning: Failed to remove profile: $(basename "$profile")"
-                                        echo "XXX"
+                                        update_progress_bar "80" "# Warning: Failed to remove profile: $(basename "$profile")"
                                     fi
                                 fi
                             else
@@ -1294,10 +1281,7 @@ configure_kvm_agent() {
                 ;;
         esac
 
-        echo "XXX"
-        echo "85"
-        echo "Configuring firewall..."
-        echo "XXX"
+        update_progress_bar "85" "Configuring firewall..."
         ports=(
             "22"           # SSH
             "1798"         # CloudStack Management Server
@@ -1329,10 +1313,7 @@ configure_kvm_agent() {
         systemctl restart libvirtd
         sleep 2
 
-        echo "XXX"
-        echo "90"
-        echo "Update agent.properties!"
-        echo "XXX"
+        update_progress_bar "90" "Update agent.properties!"
         AGENT_PROPERTIES="/etc/cloudstack/agent/agent.properties"
         if [ -f "$AGENT_PROPERTIES" ]; then
             local agent_guid=$(uuidgen)
@@ -1348,11 +1329,7 @@ configure_kvm_agent() {
     
         systemctl restart cloudstack-agent
         sleep 5
-
-        echo "XXX"
-        echo "100"
-        echo "KVM host configuration completed!"
-        echo "XXX"
+        update_progress_bar "100" "KVM host configuration completed!"
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "KVM Agent Configuration" \
                --gauge "Configuring KVM Agent..." 10 70 0
@@ -1582,17 +1559,11 @@ wait_for_management_server() {
 
     {
         while [ $elapsed -lt $timeout ]; do
-            echo "XXX"
-            echo "$((elapsed * 100 / timeout))"
-            echo "Waiting for Management Server to be ready...\n\nElapsed time: ${elapsed}s"
-            echo "XXX"
+            update_progress_bar "$((elapsed * 100 / timeout))"  "Waiting for Management Server to be ready...\n\nElapsed time: ${elapsed}s"
             
             local status_code=$(curl -s -o /dev/null -w "%{http_code}" "$url")
             if [[ "$status_code" == "200" || "$status_code" == "401" ]]; then
-                echo "XXX"
-                echo "100"
-                echo "Management Server is ready!"
-                echo "XXX"
+                update_progress_bar "100" "Management Server is ready!"
                 return 0
             fi
             
@@ -1600,10 +1571,7 @@ wait_for_management_server() {
             elapsed=$((elapsed + interval))
         done
 
-        echo "XXX"
-        echo "100"
-        echo "Timeout waiting for Management Server!"
-        echo "XXX"
+        update_progress_bar "100" "Timeout occurred while waiting for Management Server!"
         return 1
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Management Server Check" \
@@ -1616,25 +1584,18 @@ check_cloudmonkey_availability() {
         echo "10"
         echo "# Checking CloudMonkey installation..."
         if ! command -v cmk &>/dev/null; then
-            echo "XXX"
-            echo "100"
-            echo "CloudMonkey (cmk) not found!"
-            echo "XXX"
+            update_progress_bar "100" "CloudMonkey (cmk) not found!"
             return 1
         fi
 
         echo "50"
         echo "# Initializing CloudMonkey..."
         if ! cmk sync &>/dev/null; then
-            echo "XXX"
-            echo "100"
-            echo "Failed to initialize CloudMonkey!"
-            echo "XXX"
+            update_progress_bar "100" "Failed to initialize CloudMonkey!"
             return 1
         fi
 
-        echo "100"
-        echo "# CloudMonkey ready!"
+        update_progress_bar "100" "# CloudMonkey is ready!"
         return 0
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "CloudMonkey Check" \
@@ -1644,7 +1605,19 @@ check_cloudmonkey_availability() {
 # Perform Advance Zone Deployment
 deploy_zone() {
     local title="Zone Deployment"
+    local tracker_key="zone_deployment"
+    if is_step_tracked "$tracker_key"; then
+        log "$title is already installed. Skipping."
+            show_dialog "info" "$title" "$title is already done. Skipping!"
+            return 0
+    fi
     log "Starting zone deployment..."
+    # check if management server is installed
+    if ! is_package_installed "cloudstack-management"; then
+        show_dialog "msg" "$title" "CloudStack Management Server is not installed.\nPlease install it before deploying a zone."
+        error_exit "CloudStack Management Server must be installed before deploying a zone."
+    fi
+
     if [[ -z "$BRIDGE" ]]; then
         BRIDGE=$(dialog --backtitle "$SCRIPT_NAME" \
             --title "KVM Host Configuration" \
@@ -1719,8 +1692,7 @@ deploy_zone() {
     local network="${HOST_IP%.*}.0/24"
     # Find IPs for different purposes
     local public_ips=($(find_free_ip_range "$network" 11 20))  # 20 IPs for public
-    local pod_ips=($(find_free_ip_range "$network" 31 20))     # 20 IPs for pod
-    local guest_ips=($(find_free_ip_range "$network" 51 50))   # 50 IPs for guest
+    local pod_ips=($(find_free_ip_range "$network" 41 20))     # 20 IPs for pod
 
     # Default values
     local defaults=(
@@ -1730,8 +1702,6 @@ deploy_zone() {
         "Public End IP" "${public_ips[-1]}"
         "Pod Start IP" "${pod_ips[0]}"
         "Pod End IP" "${pod_ips[-1]}"
-        "Guest Start IP" "${guest_ips[0]}"
-        "Guest End IP" "${guest_ips[-1]}"
         "VLAN Range" "100-200"
         "Physical Network" "Physical Network 1"
         "Pod Name" "Pod1"
@@ -1803,17 +1773,15 @@ deploy_zone() {
     local public_end="${results[3]}"
     local pod_start="${results[4]}"
     local pod_end="${results[5]}"
-    local guest_start="${results[6]}"
-    local guest_end="${results[7]}"
-    local vlan_range="${results[8]}"
-    local phy_name="${results[9]}"
-    local pod_name="${results[10]}"
-    local cluster_name="${results[11]}"
-    local primary_name="${results[12]}"
-    local secondary_name="${results[13]}"
-    local nfs_server="${results[14]}"
-    local primary_path="${results[15]}"
-    local secondary_path="${results[16]}"
+    local vlan_range="${results[6]}"
+    local phy_name="${results[7]}"
+    local pod_name="${results[8]}"
+    local cluster_name="${results[9]}"
+    local primary_name="${results[10]}"
+    local secondary_name="${results[11]}"
+    local nfs_server="${results[12]}"
+    local primary_path="${results[13]}"
+    local secondary_path="${results[14]}"
     local network_type="Advanced"
 
     # Show confirmation
@@ -1822,12 +1790,19 @@ deploy_zone() {
     confirm_msg+="Guest CIDR: $guest_cidr\n"
     confirm_msg+="Public IPs: $public_start - $public_end\n"
     confirm_msg+="Pod IPs: $pod_start - $pod_end\n"
-    confirm_msg+="Guest IPs: $guest_start - $guest_end\n"
     confirm_msg+="VLAN Range: $vlan_range\n"
+    confirm_msg+="Physical Network Name: $phy_name\n"
+    confirm_msg+="Pod Name: $pod_name\n"
+    confirm_msg+="Cluster Name: $cluster_name\n"
+    confirm_msg+="Primary Storage Name: $primary_name\n"
+    confirm_msg+="Primary Storage Path: $nfs_server$primary_path\n"
+    confirm_msg+="Secondary Storage Path: $nfs_server$secondary_path\n"
+
+    log "Zone deployment details: $confirm_msg"
 
     if ! dialog --backtitle "$SCRIPT_NAME" \
                 --title "Confirm Configuration" \
-                --yesno "$confirm_msg" 15 60; then
+                --yesno "$confirm_msg" 18 60; then
         return 1
     fi
 
@@ -1849,11 +1824,7 @@ deploy_zone() {
     local pod_id=""
     local cluster_id="" 
     {
-        echo "XXX"
-        echo "10"
-        echo "# Starting Zone deployment..."
-        echo "XXX"
-
+        update_progress_bar "10" "# Starting Zone deployment..."
         zone_output=$(cmk create zone name="${zone_name}" \
             networktype="$network_type" \
             dns1="$DNS" \
@@ -1863,34 +1834,23 @@ deploy_zone() {
             guestcidraddress="$guest_cidr")
 
         if ! zone_id=$(echo "$zone_output" | jq -r '.zone.id' 2>/dev/null); then
-            echo "100"
-            echo "Failed to create zone: $zone_output"
-            return 1
+            error_exit "Failed to create zone: $zone_output"
         fi
-        echo "XXX"
-        echo "20"
-        echo "# Creating Physical Network..."
-        echo "XXX"
+
+        update_progress_bar "20" "# Creating Physical Network..."
         local phy_id=$(cmk create physicalnetwork name="$phy_name" \
             zoneid="$zone_id" \
             isolationmethods="VLAN" | jq -r '.physicalnetwork.id')
         
         [[ -z "$phy_id" ]] && error_exit "Failed to create physical network"
         
-        echo "XXX"
-        echo "30"
-        echo "# Adding Traffic Types..."
-        echo "XXX"
+        update_progress_bar "30" "# Adding Traffic Types..."
         # Add Traffic Types
         cmk add traffictype traffictype=Management physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Guest physicalnetworkid="$phy_id"
         cmk add traffictype traffictype=Public physicalnetworkid="$phy_id"
 
-        echo "XXX"
-        echo "35"
-        echo "# Adding IP Ranges..."
-        echo "XXX"
-
+        update_progress_bar "35" "# Adding IP Ranges..."
         # Add Public IP Range
         if ! cmk create vlaniprange \
             zoneid="$zone_id" \
@@ -1900,43 +1860,33 @@ deploy_zone() {
             startip="$public_start" \
             endip="$public_end" \
             forvirtualnetwork=true; then
-                echo "XXX"
-                echo "100"
-                echo "Failed to add Public IP range"
-                echo "XXX"
+                update_progress_bar "100" "Failed to add Public IP range"
                 return 1
         fi
+        update_progress_bar "38" "# Configuring Physical network..."
         cmk update physicalnetwork id=$phy_id vlan=$vlan_range
-        
-        echo "XXX"
-        echo "40"
-        echo "Configuring Virtual Router..."
+
+        update_progress_bar "40" "# Configuring Virtual Router..."
         cmk update physicalnetwork state=Enabled id="$phy_id"
-        echo "XXX"
-        
         local nsp_id=$(cmk list networkserviceproviders name=VirtualRouter physicalnetworkid="$phy_id" | jq -r '.networkserviceprovider[0].id')
         local vre_id=$(cmk list virtualrouterelements nspid="$nsp_id" | jq -r '.virtualrouterelement[0].id')
         
+        update_progress_bar "45" "# Configuring Virtual Router elements..."
         cmk configure virtualrouterelement enabled=true id="$vre_id"
         cmk update networkserviceprovider state=Enabled id="$nsp_id"
         
-        echo "XXX"
-        echo "50"
-        echo "Creating Pod..."
-        echo "XXX"
-        pod_id=$(cmk create pod name="$pod_name" \
+        update_progress_bar "50" "# Creating Pod..."
+        pod_output=$(cmk create pod name="$pod_name" \
             zoneid="$zone_id" \
             gateway="$GATEWAY" \
             netmask="$NETMASK" \
             startip="$pod_start" \
-            endip="$pod_end" | jq -r '.pod.id')
+            endip="$pod_end")
+        if ! pod_id=$(echo "$pod_output" | jq -r '.pod.id' 2>/dev/null); then
+            error_exit "Failed to create pod: $pod_output"
+        fi
         
-        [[ -z "$pod_id" ]] && error_exit "Failed to create pod"
-        
-        echo "XXX"
-        echo "60"
-        echo "Adding Cluster..."
-        echo "XXX"
+        update_progress_bar "60" "# Adding Cluster..."
         cluster_id=$(cmk add cluster \
             zoneid="$zone_id" \
             podid="$pod_id" \
@@ -1946,11 +1896,7 @@ deploy_zone() {
 
         [[ -z "$cluster_id" ]] && error_exit "Failed to add cluster"
         
-        echo "XXX"
-        echo "70"
-        echo "Adding Host..."
-        echo "XXX"
-        # Add Host
+        update_progress_bar "70" "# Adding Host..."
         cmk add host zoneid="$zone_id" \
             podid="$pod_id" \
             clusterid="$cluster_id" \
@@ -1959,11 +1905,7 @@ deploy_zone() {
             password="$root_pass" \
             url="http://$KVM_HOST_IP"
         
-        echo "XXX"
-        echo "80"
-        echo "Adding Primary Storage..."
-        echo "XXX"
-        # Add Primary Storage
+        update_progress_bar "80" "# Adding Primary Storage..."
         cmk create storagepool name="$primary_name" \
             zoneid="$zone_id" \
             podid="$pod_id" \
@@ -1972,30 +1914,20 @@ deploy_zone() {
             hypervisor=KVM \
             scope=zone
         
-        echo "XXX"
-        echo "90"
-        echo "Adding Secondary Storage..."
-        echo "XXX"
-        # Add Secondary Storage
+        update_progress_bar "90" "# Add Secondary Storage..."
         cmk add imagestore name="$secondary_name" \
             zoneid="$zone_id" \
             url="nfs://$nfs_server$secondary_path" \
             provider=NFS
 
-        echo "XXX"
-        echo "95"
-        echo "Enabling Zone..."
-        echo "XXX"
+        update_progress_bar "95" "# Enabling Zone..."
         cmk update zone allocationstate=Enabled id="$zone_id"
         
-        echo "XXX"
-        echo "100"
-        echo "Zone deployment completed successfully!"
-        echo "XXX"
+        update_progress_bar "100" "# Zone deployment completed successfully!"
     } | dialog --backtitle "$SCRIPT_NAME" \
-               --title "Zone Deployment" \
+               --title "$title" \
                --gauge "Deploying CloudStack Zone..." 10 70 0
-
+    set_tracker_field "$tracker_key" "yes"
     show_dialog "info" "$title" "Zone deployment completed successfully."
     show_cloudstack_banner
 }
@@ -2073,7 +2005,7 @@ network:
         forward-delay: 0
 EOF
         chmod 600 "$cfgfile"
-        configure_cloud_init
+        # configure_cloud_init
         rm -f /etc/netplan/50-cloud-init.yaml
 
         if netplan generate && netplan apply; then
@@ -2099,82 +2031,53 @@ EOF
                 ipv4.dns "$DNS" \
                 ipv4.method manual \
                 autoconnect yes 2>&1); then
-                echo "XXX"
-                echo "30"
-                echo "# Bridge created successfully\n$output"
-                echo "XXX"
+                update_progress_bar "30" "# Bridge created successfully\n$output"
             else
-                echo "XXX"
-                echo "100"
-                echo "# Failed to create bridge: $output"
-                echo "XXX"
-                exit 1
+                update_progress_bar "100" "# Failed to create bridge: $output"
+                sleep 1
+                error_exit "Failed to create bridge: $output"
             fi
 
             sleep 2
             
             # Add ethernet interface as slave
-            echo "XXX"
-            echo "50"
-            echo "# Adding interface $interface to bridge..."
-            echo "XXX"
-            
+            update_progress_bar "50" "# Adding interface $interface to bridge..."
             local slave_name="${interface}-slave-$BRIDGE"
             if output=$(nmcli connection add type ethernet \
                 slave-type bridge \
                 con-name "$slave_name" \
                 ifname "$interface" \
                 master "$BRIDGE" 2>&1); then
-                echo "XXX"
-                echo "70"
-                echo "# Interface added successfully\n$output"
-                echo "XXX"
+                update_progress_bar "70" "# Interface added successfully\n$output"
             else
-                echo "XXX"
-                echo "100"
-                echo "# Failed to add interface: $output"
-                echo "XXX"
-                exit 1
+                update_progress_bar "100" "# Failed to add interface: $output"
+                sleep 1
+                error_exit "Failed to add interface: $output"
             fi
 
             sleep 2
 
-            # Activate connections
-            echo "XXX"
-            echo "90"
-            echo "# Activating network connection..."
-            echo "XXX"
-            
+            # Activate connection
+            update_progress_bar "90" "# Activating network connection..."
             if output=$(nmcli connection up "$slave_name" 2>&1); then
-                echo "XXX"
-                echo "95"
-                echo "# Slave interface activated\n$output"
-                echo "XXX"
+                update_progress_bar "95" "# Slave interface activated\n$output"
             else
-                echo "XXX"
-                echo "100"
-                echo "# Failed to activate slave interface: $output"
-                echo "XXX"
-                exit 1
+                update_progress_bar "100" "# Failed to activate slave interface: $output"
+                sleep 1
+                error_exit "# Failed to activate slave interface: $output"
             fi
 
             sleep 5
 
             if output=$(nmcli connection up "$BRIDGE" 2>&1); then
-                echo "XXX"
-                echo "100"
-                echo "# Bridge activated successfully\n$output"
-                echo "XXX"
+                update_progress_bar "100" "# Bridge activated successfully\n$output"
             else
-                echo "XXX"
-                echo "100"
-                echo "# Failed to activate bridge: $output"
-                echo "XXX"
-                exit 1
+                update_progress_bar "100" "# Failed to activate bridge: $output"
+                sleep 1
+                error_exit "# Failed to activate bridge: $output"
             fi
 
             sleep 2
-
         } | dialog --backtitle "$SCRIPT_NAME" \
                 --title "Network Configuration" \
                 --gauge "Configuring network with NetworkManager..." 10 70 0
@@ -2274,13 +2177,16 @@ configure_prerequisites() {
 
 # Driver function for custom installation
 custom_install() {
-    configure_repo
-    if SELECTED_COMPONENTS=(); then
+    if [ ${#SELECTED_COMPONENTS[@]} -eq 0 ]; then
         select_components_to_setup
     fi
+    
+    log "Selected components for installation: ${SELECTED_COMPONENTS[*]}"
+
     if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " || " ${SELECTED_COMPONENTS[@]} " =~ " agent " || " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]]; then
         setup_network
     fi
+    configure_repo
     update_system_packages
     install_configure_components
 }
@@ -2292,10 +2198,7 @@ all_in_one_install() {
            --title "All-in-One Installation" \
            --yesno "You have selected all components for installation. This will configure a complete CloudStack setup on this single machine.\n\nProceed with All-in-One installation?" 12 60; then
         SELECTED_COMPONENTS=("nfs" "management" "agent" "usage")
-        configure_repo
-        update_system_packages
-        setup_network
-        install_configure_components
+        custom_install
     else
         dialog --backtitle "$SCRIPT_NAME" \
                --title "All-in-One Installation" \
@@ -2345,29 +2248,31 @@ main() {
             custom_install
             ;;
         3)
-            configure_repo
+            configure_cloudstack_repo
             ;;
         4)
             deploy_zone
             ;;
     esac
-
-    if show_validation_summary; then
-        if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]]; then
-            if is_interactive; then
-                if ! select_zone_deployment; then
-                    dialog --backtitle "$SCRIPT_NAME" \
-                        --title "Zone Deployment" \
-                        --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
+    
+    if [[ ${#SELECTED_COMPONENTS[@]} -gt 0 ]]; then
+        if show_validation_summary; then
+            if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " ]]; then
+                if is_interactive; then
+                    if ! select_zone_deployment; then
+                        dialog --backtitle "$SCRIPT_NAME" \
+                            --title "Zone Deployment" \
+                            --msgbox "Zone deployment skipped. You can deploy a zone later using CloudStack UI." 8 60
+                    else
+                        deploy_zone
+                    fi
                 else
                     deploy_zone
                 fi
-            else
-                deploy_zone
             fi
+        else
+            show_dialog "msg" "Zone Deployment" "Warning: Some components are not properly configured.\n\nZone deployment is not available until all components are fixed." 5 10
         fi
-    else
-        show_dialog "msg" "Zone Deployment" "Warning: Some components are not properly configured.\n\nZone deployment is not available until all components are fixed." 5 10
     fi
     rm -f "$temp_file"
     cleanup 0 
