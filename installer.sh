@@ -758,10 +758,14 @@ configure_cloudstack_repo() {
 
     local repo_base_url=$(echo "$repo_entry" | sed -E 's|.*(https?://[^/ ]+).*|\1|')
     local gpg_url="${repo_base_url}/release.asc"
-    if ! dialog --backtitle "$SCRIPT_NAME" \
-           --title "Confirm Repository" \
-           --yesno "The following CloudStack repository will be added:\n\n$repo_entry\n\nProceed?" 12 70; then
-        error_exit "CloudStack repository configuration cancelled by user."
+    if is_interactive; then
+        if ! dialog --backtitle "$SCRIPT_NAME" \
+            --title "Confirm Repository" \
+            --yesno "The following CloudStack repository will be added:\n\n$repo_entry\n\nProceed?" 12 70; then
+            error_exit "CloudStack repository configuration cancelled by user."
+        fi
+    else
+        show_dialog "info" "$title" "The following CloudStack repository will be added:\n\n$repo_entry" 4
     fi
            
     log "Configuring CS repo: $repo_entry"
@@ -992,11 +996,11 @@ configure_management_server_database() {
         cloudstack-setup-management 2>&1 | \
             while IFS= read -r line; do
                 msg=$(echo "$line" | strip_ansi)
-                update_progress_bar "75" "Deploying Management Server...\n\n$msg"
+                update_progress_bar "75" "Starting Management Server...\n\n$msg"
             done
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Management Server Setup" \
-               --gauge "Starting management server setup..." 10 70 0
+               --gauge "Starting management server setup..." 10 72 0
 
     sleep 5
     set_tracker_field "$tracker_key" "yes"
@@ -1825,10 +1829,14 @@ deploy_zone() {
 
     log "Zone deployment details: $confirm_msg"
 
-    if ! dialog --backtitle "$SCRIPT_NAME" \
-                --title "Confirm Configuration" \
-                --yesno "$confirm_msg" 18 60; then
-        return 1
+    if is_interactive; then
+        if ! dialog --backtitle "$SCRIPT_NAME" \
+                    --title "Confirm Configuration" \
+                    --yesno "$confirm_msg" 18 60; then
+            return 1
+        fi
+    else
+        show_dialog "info" $title "Zone Configuration: \n$confirm_msg" 5 20 60
     fi
 
     if ! wait_for_management_server; then
@@ -1979,9 +1987,11 @@ configure_cloud_init() {
 }
 
 configure_network() {
-    local new_bridge=$(dialog --inputbox "Enter the name for the bridge:" 8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
-    if [[ -n "$new_bridge" && "$new_bridge" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]]; then
-        BRIDGE="$new_bridge"
+    if is_interactive; then
+        local new_bridge=$(dialog --inputbox "Enter the name for the bridge:" 8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
+        if [[ -n "$new_bridge" && "$new_bridge" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]]; then
+            BRIDGE="$new_bridge"
+        fi
     fi
 
     # First check if bridge already exists
