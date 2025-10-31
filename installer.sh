@@ -315,7 +315,7 @@ update_system_packages() {
 
                 apt-get upgrade -y 2>&1 | while IFS= read -r line; do
                     percent=$((percent + 1))
-                    [ $percent -gt 90 ] && percent=90
+                    [ $percent -gt 80 ] && percent=80
                     update_progress_bar "$percent" "# Installing updates...\n\n$line"
                 done
                 ;;
@@ -328,14 +328,14 @@ update_system_packages() {
 
                 dnf makecache 2>&1 | while IFS= read -r line; do
                     percent=$((percent + 1))
-                    [ $percent -gt 70 ] && percent=70
+                    [ $percent -gt 60 ] && percent=60
                     update_progress_bar "40" "# Updating package cache...\n\n$line"
                 done
 
                 dnf update -y 2>&1 | while IFS= read -r line; do
                     percent=$((percent + 1))
-                    [ $percent -gt 90 ] && percent=90
-                    update_progress_bar "75" "# Installing system updates...\n\n$line"
+                    [ $percent -gt 80 ] && percent=80
+                    update_progress_bar "$percent" "# Installing system updates...\n\n$line"
                 done
                 ;;
         esac
@@ -604,6 +604,17 @@ find_free_ip_range() {
 #-------------------------------------------------------------------------------
 # Script specific functions
 #-------------------------------------------------------------------------------
+
+
+is_cloudstack_pkg_selected() {
+    if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " || \
+          " ${SELECTED_COMPONENTS[@]} " =~ " agent " || \
+          " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]]; then
+        return 0  # true
+    else
+        return 1  # false
+    fi
+}
 
 
 # Configure CloudStack repository for Debian/Ubuntu
@@ -910,6 +921,7 @@ install_management_server() {
     local package_name="cloudstack-management"
     local tracker_key="management_installed"
     if is_step_tracked "$tracker_key"; then
+        show_dialog "info" "Management Server Installation" "Management Server is already installed.\n\nSkipping installation."
         log "CloudStack Management Server is already installed. Skipping installation."
         return 0
     fi
@@ -927,6 +939,7 @@ configure_management_server_database() {
     local tracker_key="db_deployed"
     if is_step_tracked "$tracker_key"; then
         log "CloudStack database is already deployed. Skipping deployment."
+        show_dialog "info" "$title" "$title is already done.\n\nSkipping it."
         return 0
     fi
     log "Starting CloudStack database deployment..."
@@ -996,6 +1009,7 @@ install_mysql_server() {
     local tracker_key="mysql_installed"
     if is_step_tracked "$tracker_key"; then
         log "MySQL is already installed. Skipping installation."
+        show_dialog "info" "MySQL Server Installation" "MySQL Server is already installed.\n\nSkipping installation."
         return 0
     fi
 
@@ -1012,6 +1026,7 @@ configure_mysql_for_cloudstack() {
     local tracker_key="mysql_configured"
     if is_step_tracked "$tracker_key"; then
         log "MySQL is already configured for CloudStack. Skipping configuration."
+        show_dialog "info" "MySQL Server Configuration" "MySQL Server is already configured.\n\nSkipping configuration."
         return 0
     fi
     log "Starting MySQL configuration..."
@@ -1024,7 +1039,7 @@ configure_mysql_for_cloudstack() {
   
     local config_file="$MYSQL_CONF_DIR/cloudstack.cnf"
     if [[ -f "$config_file" ]]; then
-        show_dialog "info" "$title" "Configuration already exists at:\n$config_file\nSkipping MySQL setup."
+        show_dialog "info" "$title" "Configuration already exists at:\n$config_file\n\nSkipping MySQL setup."
         set_tracker_field "$tracker_key" "yes"
         return 0
     fi
@@ -1065,14 +1080,14 @@ install_nfs_server() {
     local tracker_key="nfs_installed"
     if is_step_tracked "$tracker_key"; then
         log "NFS Server is already installed. Skipping installation."
-        show_dialog "info" "NFS Server Installation" "NFS Server is already installed. Skipping installation."
+        show_dialog "info" "NFS Server Installation" "NFS Server is already installed.\n\nSkipping installation."
         return 0
     fi
 
     if command -v exportfs &>/dev/null; then
         log "NFS Server is already installed."
         set_tracker_field "$tracker_key" "yes"
-        show_dialog "info" "NFS Server Installation" "NFS Server is already installed. Skipping installation."
+        show_dialog "info" "NFS Server Installation" "NFS Server is already installed.\n\nSkipping installation."
         return 0
     fi
 
@@ -1113,15 +1128,16 @@ get_export_cidr() {
 # Configure NFS Server
 configure_nfs_server() {
     local tracker_key="nfs_configured"
-    local title="NFS Storage Configuration"
+    local title="NFS Server Configuration"
     if is_step_tracked "$tracker_key"; then
-        log "NFS storage is already configured. Skipping setup."
+        log "NFS Server is already configured. Skipping configuration."
+        show_dialog "info" "$title" "NFS Server is already configured.\n\nSkipping configuration."
         return 0
     fi
     log "Starting NFS storage configuration..."
 
     if [[ -d "/export" ]] && grep -q "^/export " /etc/exports; then
-        show_dialog "info" "$title" "NFS is already configured. Skipping setup."
+        show_dialog "info" "$title" "NFS Server is already configured.\n\nSkipping configuration."
         set_tracker_field "$tracker_key" "yes"
         return 0
     fi
@@ -1190,6 +1206,7 @@ install_kvm_agent() {
     local tracker_key="agent_installed"
     if is_step_tracked "$tracker_key"; then
         log "KVM Agent is already installed. Skipping installation."
+        show_dialog "info" "Cloudstack Agent Installation" "CloudStack Agent is already installed.\n\nSkipping installation."
         return 0
     fi
     if is_package_installed "$package_name"; then
@@ -1202,13 +1219,14 @@ install_kvm_agent() {
 
 configure_kvm_agent() {
     local tracker_key="agent_configured"
-    local title="KVM Host Configuration"
+    local title="CloudStack Agent Configuration"
     if is_step_tracked "$tracker_key"; then
         log "KVM Agent is already configured. Skipping configuration."
+        show_dialog "info" "$title" "CloudStack Agent is already configured.\n\nSkipping configuration."
         return 0
     fi
-    log "Starting KVM host configuration..."
-    show_dialog "info" "$title" "Starting KVM host configuration..."
+    log "Starting CloudStack Agent configuration..."
+    show_dialog "info" "$title" "Starting CloudStack Agent configuration..."
 
     # Configure VNC
     {
@@ -1350,20 +1368,6 @@ configure_kvm_agent() {
                --title "KVM Agent Configuration" \
                --gauge "Configuring KVM Agent..." 10 70 0
 
-    # Show configuration summary
-    local summary="KVM Host Configuration Summary:\n\n"
-    summary+="✓ VNC configured for remote access\n"
-    summary+="✓ Libvirt TCP access enabled\n"
-    summary+="✓ Security policies configured\n"
-    summary+="✓ Firewall rules added for ports:\n"
-    summary+="  - SSH (22)\n"
-    summary+="  - Libvirt (16509)\n"
-    summary+="  - VNC (5900-6100)\n"
-    summary+="  - Live Migration (49152-49216)\n"
-    
-    show_dialog "info" "$title" "$summary" 15 60
-
-    # Verify configuration
     if ! systemctl is-active --quiet libvirtd; then
         show_dialog "msg" "$title" "Libvirt service is not running! Please check system logs."
     fi
@@ -1376,6 +1380,7 @@ install_usage_server() {
     local tracker_key="usage_installed"
     if is_step_tracked "$tracker_key"; then
         log "CloudStack Usage Server is already installed. Skipping installation."
+        show_dialog "info" "Usage Server Installation" "CloudStack Usage Server is already installed.\n\nSkipping installation."
         return 0
     fi
     if is_package_installed "$package_name"; then
@@ -1398,6 +1403,7 @@ configure_usage_server() {
     local tracker_key="usage_configured"
     if is_step_tracked "$tracker_key"; then
         log "Usage Server is already configured. Skipping configuration."
+        show_dialog "info" "Usage Server Configuration" "CloudStack Usage Server is already configured.\n\nSkipping configuration."
         return 0
     fi
     log "Starting Usage Server configuration..."
@@ -1410,8 +1416,8 @@ configure_usage_server() {
         show_dialog "msg" "Usage Server Configuration" "Database configuration files not found!\nPlease ensure CloudStack Management Server is configured."
         return 1
     fi
-
-    sleep 5
+    set_tracker_field "$tracker_key" "yes"
+    sleep 2
 }
 
 # Function to present component selection dialog
@@ -1447,17 +1453,19 @@ show_validation_summary() {
     local status_ok=true
 
     # 1. Network Validation
-    if ip link show "$BRIDGE" &>/dev/null; then
-        local bridge_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
-        if [[ -n "$bridge_ip" ]]; then
-            summary+="✓ Network: Bridge $BRIDGE configured with IP $bridge_ip\n"
+    if is_cloudstack_pkg_selected; then
+        if ip link show "$BRIDGE" &>/dev/null; then
+            local bridge_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
+            if [[ -n "$bridge_ip" ]]; then
+                summary+="✓ Network: Bridge $BRIDGE configured with IP $bridge_ip\n"
+            else
+                summary+="✗ Network: Bridge $BRIDGE has no IP address\n"
+                status_ok=false
+            fi
         else
-            summary+="✗ Network: Bridge $BRIDGE has no IP address\n"
+            summary+="✗ Network: Bridge $BRIDGE not found\n"
             status_ok=false
         fi
-    else
-        summary+="✗ Network: Bridge $BRIDGE not found\n"
-        status_ok=false
     fi
 
     # 2. MySQL Validation
@@ -2124,7 +2132,7 @@ setup_network() {
     log "Starting network configuration"
     if is_step_tracked "network_name"; then
         BRIDGE=$(get_tracker_field "network_name")
-        show_dialog "info" "Network Configuration" "Network already configured with bridge $BRIDGE\n\n Skipping network configuration."
+        show_dialog "info" "Network Configuration" "Network already configured with bridge $BRIDGE.\n\n Skipping network configuration."
         return 0
     fi
     configure_network
@@ -2197,13 +2205,11 @@ custom_install() {
     if [ ${#SELECTED_COMPONENTS[@]} -eq 0 ]; then
         select_components_to_setup
     fi
-    
     log "Selected components for installation: ${SELECTED_COMPONENTS[*]}"
-
-    if [[ " ${SELECTED_COMPONENTS[@]} " =~ " management " || " ${SELECTED_COMPONENTS[@]} " =~ " agent " || " ${SELECTED_COMPONENTS[@]} " =~ " usage " ]]; then
+    if is_cloudstack_pkg_selected; then
         setup_network
+        configure_repo
     fi
-    configure_repo
     update_system_packages
     install_configure_components
 }
