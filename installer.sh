@@ -25,9 +25,8 @@ set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Global variables
 SCRIPT_NAME="Apache CloudStack Installer"
-CS_LOGDIR="/var/log/cloudstack/installer"
-CS_LOGFILE="${CS_LOGDIR}/cloudstack-installer.log"
-TRACKER_FILE="$HOME/cloudstack-installer-tracker.conf"
+CS_LOGFILE="$PWD/cloudstack-install.log"
+TRACKER_FILE="$PWD/cloudstack-installer-tracker.conf"
 
 OS_TYPE=""
 PACKAGE_MANAGER=""
@@ -914,7 +913,7 @@ show_components_versions() {
                 ;;
         esac
     done
-    show_dialog info "Component Versions" "Available versions from repository:\n\n$(printf '%s\n' "${versions[@]}")" 6 10 60
+    show_dialog info "Component Versions" "Available versions from repository:\n\n$(printf '%s\n' "${versions[@]}")" 6 10 55
 }
 
 # Component installation and configuration functions
@@ -1743,58 +1742,51 @@ deploy_zone() {
     )
     
     local results=()
-    if is_interactive; then
-        # Create form entries
-        local form_height=$((${#defaults[@]} / 2 + 8))
-        local form_entries=()
-        local i=0
-        while [[ $i -lt ${#defaults[@]} ]]; do
-            form_entries+=("${defaults[i]}")     # Label
-            form_entries+=("$((i/2+1))")         # Row
-            form_entries+=("1")                  # Label column
-            form_entries+=("${defaults[i+1]}")   # Default value
-            form_entries+=("$((i/2+1))")         # Row for input
-            form_entries+=("35")                 # Input column
-            form_entries+=("30")                 # Field width
-            form_entries+=("0")                  # Max input length
-            ((i+=2))
-        done
+    # Create zone form entries
+    local form_height=$((${#defaults[@]} / 2 + 8))
+    local form_entries=()
+    local i=0
+    while [[ $i -lt ${#defaults[@]} ]]; do
+        form_entries+=("${defaults[i]}")     # Label
+        form_entries+=("$((i/2+1))")         # Row
+        form_entries+=("1")                  # Label column
+        form_entries+=("${defaults[i+1]}")   # Default value
+        form_entries+=("$((i/2+1))")         # Row for input
+        form_entries+=("35")                 # Input column
+        form_entries+=("30")                 # Field width
+        form_entries+=("0")                  # Max input length
+        ((i+=2))
+    done
 
-        form_args=(
-            --backtitle "$SCRIPT_NAME"
-            --title "Zone Configuration"
-            --form "Configure Zone Deployment Parameters:"
-            $form_height 70 0
+    form_args=(
+        --backtitle "$SCRIPT_NAME"
+        --title "Zone Configuration"
+        --form "Configure Zone Deployment Parameters:"
+        $form_height 70 0
+    )
+
+    for ((i=0; i<${#form_entries[@]}; i+=8)); do
+        form_args+=(
+            "${form_entries[i]}"      # Label
+            "${form_entries[i+1]}"    # Row
+            "${form_entries[i+2]}"    # Label column
+            "${form_entries[i+3]}"    # Default value
+            "${form_entries[i+4]}"    # Input row
+            "${form_entries[i+5]}"    # Input column
+            "${form_entries[i+6]}"    # Field width
+            "${form_entries[i+7]}"    # Max length
         )
-
-        for ((i=0; i<${#form_entries[@]}; i+=8)); do
-            form_args+=(
-                "${form_entries[i]}"      # Label
-                "${form_entries[i+1]}"    # Row
-                "${form_entries[i+2]}"    # Label column
-                "${form_entries[i+3]}"    # Default value
-                "${form_entries[i+4]}"    # Input row
-                "${form_entries[i+5]}"    # Input column
-                "${form_entries[i+6]}"    # Field width
-                "${form_entries[i+7]}"    # Max length
-            )
-        done
-        if ! results=$(dialog "${form_args[@]}" 2>&1 >/dev/tty); then
-            dialog --backtitle "$SCRIPT_NAME" \
-                --title "Cancelled" \
-                --msgbox "Zone configuration was cancelled." 6 50
-            return 1
-        fi
-
-        # Convert results string into array
-        mapfile -t results <<< "$results"
-    else
-        results=()
-        for ((i=1; i<${#defaults[@]}; i+=2)); do
-            results+=("${defaults[i]}")
-        done
+    done
+    if ! results=$(dialog "${form_args[@]}" 2>&1 >/dev/tty); then
+        dialog --backtitle "$SCRIPT_NAME" \
+            --title "Cancelled" \
+            --msgbox "Zone configuration was cancelled." 6 50
+        return 1
     fi
 
+    # Convert results string into array
+    mapfile -t results <<< "$results"
+    
     # Map results to variables
     local zone_name="${results[0]}"
     local guest_cidr="${results[1]}"
@@ -1814,29 +1806,27 @@ deploy_zone() {
     local network_type="Advanced"
 
     # Show confirmation
-    local confirm_msg="Please confirm the following configuration:\n\n"
-    confirm_msg+="Zone: $zone_name (${network_type})\n"
-    confirm_msg+="Guest CIDR: $guest_cidr\n"
-    confirm_msg+="Public IPs: $public_start - $public_end\n"
-    confirm_msg+="Pod IPs: $pod_start - $pod_end\n"
-    confirm_msg+="VLAN Range: $vlan_range\n"
-    confirm_msg+="Physical Network Name: $phy_name\n"
-    confirm_msg+="Pod Name: $pod_name\n"
-    confirm_msg+="Cluster Name: $cluster_name\n"
-    confirm_msg+="Primary Storage Name: $primary_name\n"
-    confirm_msg+="Primary Storage Path: $nfs_server$primary_path\n"
-    confirm_msg+="Secondary Storage Path: $nfs_server$secondary_path\n"
-
-    log "Zone deployment details: $confirm_msg"
-
+    local zone_details=""
+    zone_details+="Zone: $zone_name (${network_type})\n"
+    zone_details+="Guest CIDR: $guest_cidr\n"
+    zone_details+="Public IPs: $public_start - $public_end\n"
+    zone_details+="Pod IPs: $pod_start - $pod_end\n"
+    zone_details+="VLAN Range: $vlan_range\n"
+    zone_details+="Physical Network Name: $phy_name\n"
+    zone_details+="Pod Name: $pod_name\n"
+    zone_details+="Cluster Name: $cluster_name\n"
+    zone_details+="Primary Storage Name: $primary_name\n"
+    zone_details+="Primary Storage Path: nfs://$nfs_server$primary_path\n"
+    zone_details+="Secondary Storage Path: nfs://$nfs_server$secondary_path\n"
+    
+    log "$(printf "Zone details:\n%b" "$zone_details")"
     if is_interactive; then
+        local confirm_msg="Please confirm the following configuration:\n\n$zone_details"
         if ! dialog --backtitle "$SCRIPT_NAME" \
                     --title "Confirm Configuration" \
                     --yesno "$confirm_msg" 18 60; then
             return 1
         fi
-    else
-        show_dialog "info" $title "Zone Configuration: \n$confirm_msg" 5 20 60
     fi
 
     if ! wait_for_management_server; then
@@ -1965,27 +1955,7 @@ deploy_zone() {
     show_cloudstack_banner
 }
 
-configure_cloud_init() {
-    # Check if already configured
-    if grep -q 'config: disabled' /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg 2>/dev/null; then
-        dialog --backtitle "$SCRIPT_NAME" \
-                --title "Cloud-init Configuration" \
-                --msgbox "Cloud-init network configuration already disabled." 6 50
-        return 0
-    fi
-
-    {
-        echo "50"
-        echo "# Disabling cloud-init network configuration..."
-        echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-        
-        echo "100"
-        echo "# Configuration complete!"
-    } | dialog --backtitle "$SCRIPT_NAME" \
-               --title "Cloud-init Configuration" \
-               --gauge "Configuring cloud-init..." 8 60 0
-}
-
+# Function to setup bridge used for CS
 configure_network() {
     if is_interactive; then
         local new_bridge=$(dialog --inputbox "Enter the name for the bridge:" 8 60 "$BRIDGE" 3>&1 1>&2 2>&3)
@@ -2040,7 +2010,6 @@ network:
         forward-delay: 0
 EOF
         chmod 600 "$cfgfile"
-        # configure_cloud_init
         rm -f /etc/netplan/50-cloud-init.yaml
 
         if netplan generate && netplan apply; then
@@ -2313,9 +2282,6 @@ main() {
 
 # Set trap for cleanup
 trap 'cleanup 1' INT TERM
-
-# Ensure log directory exists
-mkdir -p $CS_LOGDIR
 
 # Run main function
 main "$@"
