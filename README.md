@@ -130,7 +130,7 @@ This installer is designed to make **Apache CloudStack** accessible for learning
 
 | File | Purpose |
 |------|----------|
-| `cloudstack-install.log` | Detailed logs for all operations |
+| `installer.log` | Detailed logs for all operations |
 | `cloudstack-installer-tracker.conf` | Tracks completed steps to allow safe re-runs |
 
 ---

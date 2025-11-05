@@ -25,7 +25,7 @@ set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Global variables
 SCRIPT_NAME="Apache CloudStack Installer"
-CS_LOGFILE="$PWD/cloudstack-install.log"
+CS_LOGFILE="$PWD/installer.log"
 TRACKER_FILE="$PWD/cloudstack-installer-tracker.conf"
 
 OS_TYPE=""
@@ -328,7 +328,7 @@ update_system_packages() {
                 dnf makecache 2>&1 | while IFS= read -r line; do
                     percent=$((percent + 1))
                     [ $percent -gt 60 ] && percent=60
-                    update_progress_bar "40" "# Updating package cache...\n\n$line"
+                    update_progress_bar "$percent" "# Updating package cache...\n\n$line"
                 done
 
                 dnf update -y 2>&1 | while IFS= read -r line; do
@@ -1431,8 +1431,8 @@ select_components_to_setup() {
     if dialog --clear --backtitle "$SCRIPT_NAME" \
            --title "$title" \
            --checklist "Select CloudStack components to install:" 15 70 6 \
-           "management" "CloudStack Management Server" on \
-           "usage" "CloudStack Usage Server" off \
+           "management" "Management Server" on \
+           "usage" "Usage Server" off \
            "agent" "KVM Agent" on \
            "nfs" "NFS Server" on \
            2> "$temp_file"; then
@@ -1573,7 +1573,7 @@ show_validation_summary() {
 select_zone_deployment() {
     dialog --backtitle "$SCRIPT_NAME" \
            --title "Zone Deployment" \
-           --yesno "Would you like to deploy a new CloudStack Zone?\n\nThis will:\n\n1. Create a new Zone\n2. Configure Network offerings\n3. Add the first Pod\n4. Add the first Cluster\n5. Add the first Host\n\nDeploy Zone now?" 15 60
+           --yesno "Would you like to deploy a new CloudStack Zone?\n\nThis will:\n\n1. Create a new Zone\n2. Configure Network\n3. Add the first Pod\n4. Add the first Cluster\n5. Add the first Host\n\nDeploy Zone now?" 15 60
 
     return $?
 }
@@ -1889,12 +1889,12 @@ deploy_zone() {
         update_progress_bar "38" "# Configuring Physical network..."
         cmk update physicalnetwork id=$phy_id vlan=$vlan_range
 
-        update_progress_bar "40" "# Configuring Virtual Router..."
+        update_progress_bar "40" "# Configuring Physical network..."
         cmk update physicalnetwork state=Enabled id="$phy_id"
         local nsp_id=$(cmk list networkserviceproviders name=VirtualRouter physicalnetworkid="$phy_id" | jq -r '.networkserviceprovider[0].id')
         local vre_id=$(cmk list virtualrouterelements nspid="$nsp_id" | jq -r '.virtualrouterelement[0].id')
         
-        update_progress_bar "45" "# Configuring Virtual Router elements..."
+        update_progress_bar "45" "# Configuring Physical network..."
         cmk configure virtualrouterelement enabled=true id="$vre_id"
         cmk update networkserviceprovider state=Enabled id="$nsp_id"
         
