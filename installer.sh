@@ -1095,15 +1095,18 @@ install_nfs_server() {
     fi
 
     local package_name=""
+    local nfs_svc="nfs-server"
     case "$PACKAGE_MANAGER" in
         apt)
             package_name="nfs-kernel-server nfs-common quota"
+            nfs_svc="nfs-kernel-server"
             ;;
         dnf)
             package_name="nfs-utils quota"
             ;;
     esac
     install_pkg_with_progress_bar "NFS Server" "$package_name" "$tracker_key"
+    start_service_with_progress "$nfs_svc" "NFS" 60 90
 }
 
 # Get local CIDR for NFS export configuration
@@ -1339,13 +1342,16 @@ configure_kvm_agent() {
                 fi
                 ;;
             rhel|centos|ol|rocky|almalinux)
-                if command -v firewall-cmd >/dev/null; then
+                if systemctl is-active --quiet firewalld; then
                     for port in "${ports[@]}"; do
-                        firewall-cmd --permanent --add-port="$port"
+                        # Convert port ranges from 5900:6100 -> 5900-6100 for firewalld
+                        range_port="${port/:/-}"
+                        firewall-cmd --permanent --add-port="$range_port"/tcp
                     done
                     firewall-cmd --reload
                 fi
                 ;;
+
         esac
         systemctl restart libvirtd
         sleep 2
@@ -1519,7 +1525,7 @@ show_validation_summary() {
     # 5. KVM Agent Validation
     if [[ " ${SELECTED_COMPONENTS[@]} " =~ " agent " ]]; then
         if systemctl is-active --quiet libvirtd; then
-            if grep -q "^listen_tcp = 1" /etc/libvirt/libvirtd.conf; then
+            if grep -qE '^tcp_port\s*=\s*"16509"' /etc/libvirt/libvirtd.conf; then
                 summary+="✓ KVM: Libvirt running and configured\n"
                 if systemctl is-active --quiet cloudstack-agent; then
                     summary+="✓ KVM: CloudStack agent running\n"
