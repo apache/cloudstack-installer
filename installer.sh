@@ -625,6 +625,7 @@ _configure_deb_repo() {
     {
         echo "Configuring CloudStack repository..."
         echo "Adding CloudStack's signing key..."
+        mkdir -p /etc/apt/keyrings
 
         if curl -fsSL "$gpg_key_url" | gpg --dearmor | sudo tee /etc/apt/keyrings/cloudstack.gpg > /dev/null; then
             echo "CloudStack signing key added successfully."
@@ -646,6 +647,7 @@ _configure_deb_repo() {
 _configure_rpm_repo () {
     local gpg_key_url="$1"
     local repo_entry="$2"
+    mkdir -p /etc/yum.repos.d/
     {
         echo "Adding CloudStack repository..."
         if cat > /etc/yum.repos.d/cloudstack.repo <<EOF
@@ -806,6 +808,34 @@ install_dialog_utility() {
             ;;
         dnf)
             dnf install -y dialog || error_exit "Failed to install dialog"
+            ;;
+    esac
+}
+update_system_time() {
+    case $PACKAGE_MANAGER in
+        dnf)
+            if ! systemctl is-active chronyd >/dev/null 2>&1; then
+                systemctl enable --now chronyd
+            fi
+            chronyc makestep
+            ;;
+
+        apt)
+            # Detect what NTP mechanism is available
+            if systemctl is-active ntp >/dev/null 2>&1; then
+                echo ">>> ntp detected, forcing sync via ntpd..."
+                ntpd -gq || true
+
+            elif systemctl is-active chrony >/dev/null 2>&1; then
+                echo ">>> chrony detected, forcing sync via chronyc..."
+                chronyc makestep
+
+            else
+                echo ">>> Falling back to systemd-timesyncd..."
+                systemctl enable --now systemd-timesyncd || true
+                timedatectl set-ntp true || true
+                systemctl restart systemd-timesyncd || true
+            fi
             ;;
     esac
 }
@@ -2182,6 +2212,7 @@ validate_system_resources() {
 # Configure prerequisites before installation
 configure_prerequisites() {
     detect_os
+    update_system_time
     install_base_dependencies
 }
 
