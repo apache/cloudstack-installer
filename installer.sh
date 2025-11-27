@@ -138,19 +138,20 @@ check_kvm_support() {
     fi
     success_msg "✓ CPU virtualization support detected"
 
-    if ! lsmod | grep -q kvm; then
-        if grep -q 'vmx' /proc/cpuinfo; then
-            sudo modprobe kvm_intel
-        elif grep -q 'svm' /proc/cpuinfo; then
-            sudo modprobe kvm_amd
-        else
-            error_exit "Unable to determine the CPU type for KVM modules."
-        fi
-        if ! lsmod | grep -q kvm; then
-            error_exit  "KVM kernel module is not loaded"
-        fi
+    if grep -q vmx /proc/cpuinfo; then
+        MODULE="kvm_intel"
+    elif grep -q svm /proc/cpuinfo; then
+        MODULE="kvm_amd"
+    else
+        error_exit "Unable to determine CPU type for KVM module."
     fi
-    success_msg "✓ KVM kernel module loaded"
+
+    modprobe "$MODULE" 2>/dev/null || true
+    # Validate loaded module
+    if ! lsmod | grep -q "$MODULE"; then
+        error_exit "KVM module $MODULE is not loaded. Ensure virtualization is enabled in BIOS/UEFI."
+    fi
+    success_msg "✓ KVM kernel module ($MODULE) loaded"
 }
 
 validate_selinux() {
