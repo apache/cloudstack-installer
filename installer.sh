@@ -139,9 +139,36 @@ check_kvm_support() {
     success_msg "✓ CPU virtualization support detected"
 
     if ! lsmod | grep -q kvm; then
-        error_exit "KVM kernel module is not loaded"
+        if grep -q 'vmx' /proc/cpuinfo; then
+            sudo modprobe kvm_intel
+        elif grep -q 'svm' /proc/cpuinfo; then
+            sudo modprobe kvm_amd
+        else
+            error_exit "Unable to determine the CPU type for KVM modules."
+        fi
+        if ! lsmod | grep -q kvm; then
+            error_exit  "KVM kernel module is not loaded"
+        fi
     fi
     success_msg "✓ KVM kernel module loaded"
+}
+
+validate_selinux() {
+    if command -v getenforce >/dev/null 2>&1; then
+        SELINUX_MODE=$(getenforce)
+        if [ "$SELINUX_MODE" = "Enforcing" ]; then
+            msg="SELinux is ENFORCING. Script cannot continue."
+            msg+="\nFix it by:"
+            msg+="\n  1) Edit /etc/selinux/config → SELINUX=permissive"
+            msg+="\n  2) Run: setenforce 0"
+            msg+="\n  3) Reboot"
+            error_exit "$msg"
+        else
+            success_msg "SELinux status: $SELINUX_MODE"
+        fi
+    else
+        success_msg "SELinux not detected. Continuing..."
+    fi
 }
 
 # Initialize OS_TYPE, PACKAGE_MANAGER, MYSQL_SERVICE, MYSQL_CONF_DIR
@@ -165,6 +192,7 @@ detect_os() {
             PACKAGE_MANAGER="dnf"
             MYSQL_SERVICE="mysqld"
             MYSQL_CONF_DIR="/etc/my.cnf.d"
+            validate_selinux
             ;;
         *)
             echo "Unsupported OS: $OS_TYPE"
@@ -853,7 +881,7 @@ install_base_dependencies() {
         case "$PACKAGE_MANAGER" in
             apt)
                 DEBIAN_FRONTEND=noninteractive \
-                apt-get install -y qemu-kvm apt-utils curl openntpd openssh-server sshpass sudo wget jq htop tar nmap bridge-utils util-linux >> "$TMP_LOG" 2>&1 &
+                apt-get install -y qemu-kvm apt-utils gnupg curl openntpd openssh-server sshpass sudo wget jq htop tar nmap bridge-utils util-linux >> "$TMP_LOG" 2>&1 &
                 ;;
             dnf)
                 dnf install -y curl openssh-server chrony sshpass sudo wget jq tar nmap util-linux >> "$TMP_LOG" 2>&1 &
@@ -1020,6 +1048,14 @@ configure_management_server_database() {
                --title "$title" \
                --gauge "Starting database deployment..." 10 70 0
 
+    db_exit=${PIPESTATUS[0]}
+    if [ $db_exit -ne 0 ]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+            --title "Database Setup Failed" \
+            --msgbox "CloudStack database setup failed." 10 70
+        error_exit "CloudStack database setup failed."
+    fi
+
     {
         echo "# Starting CloudStack Management Server setup..."
         cloudstack-setup-management 2>&1 | \
@@ -1030,6 +1066,14 @@ configure_management_server_database() {
     } | dialog --backtitle "$SCRIPT_NAME" \
                --title "Management Server Setup" \
                --gauge "Starting management server setup..." 10 72 0
+    mgmt_exit=${PIPESTATUS[0]}
+
+    if [ $mgmt_exit -ne 0 ]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+            --title "Management Setup Failed" \
+            --msgbox "CloudStack management setup failed" 10 70
+        error_exit "CloudStack management setup failed."
+    fi
 
     sleep 5
     set_tracker_field "$tracker_key" "yes"
@@ -1273,7 +1317,7 @@ configure_kvm_agent() {
             error_exit "Failed to configure VNC"
         fi
 
-        if ! grep '^LIBVIRTD_ARGS="--listen"' /etc/default/libvirtd > /dev/null; then
+        if ! grep -q '^LIBVIRTD_ARGS="--listen"' /etc/default/libvirtd > /dev/null; then
             echo 'LIBVIRTD_ARGS="--listen"' >> /etc/default/libvirtd
         fi
 
@@ -2017,7 +2061,7 @@ configure_network() {
     gateway=$(ip route show default | awk '/default/ {print $3; exit}')
 
     # Rest of the existing configure_network code follows...
-    if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
+    if [[ "$OS_TYPE" == "ubuntu" ]]; then
         dialog --backtitle "$SCRIPT_NAME" \
                --infobox "Configuring bridge $BRIDGE using Netplan..." 5 50
         sleep 1
@@ -2056,6 +2100,31 @@ EOF
         else
             error_exit "Failed to apply Netplan configuration"
         fi
+    elif [[ "$OS_TYPE" == "debian" ]]; then
+        dialog --backtitle "$SCRIPT_NAME" \
+                   --infobox "Configuring bridge $BRIDGE using /etc/network/interfaces..." 5 60
+            sleep 1
+
+            cfgfile="/etc/network/interfaces.d/01-bridge-$BRIDGE"
+            cat > "$cfgfile" <<EOF
+auto $BRIDGE
+iface $BRIDGE inet static
+    address $hostipandsub
+    netmask $NETMASK
+    gateway $gateway
+    dns-nameservers $DNS
+    bridge_ports $interface
+    bridge_stp off
+    bridge_fd 0
+EOF
+            chmod 600 "$cfgfile"
+
+            if command -v ifreload &>/dev/null; then
+                ifreload -a
+            else
+                ifdown $interface || true
+                ifup $BRIDGE
+            fi
 
     elif [[ "$OS_TYPE" =~ ^(rhel|centos|ol|rocky|almalinux)$ ]]; then
         {
