@@ -596,7 +596,8 @@ show_cloudstack_banner() {
 
     Note: Please change the default password after first login.
     "
-
+    log "$banner"
+    
     dialog --backtitle "$SCRIPT_NAME" \
         --title "Installation Complete" \
         --colors \
@@ -2129,81 +2130,123 @@ EOF
 
     elif [[ "$OS_TYPE" =~ ^(rhel|centos|ol|rocky|almalinux)$ ]]; then
         {
-            echo "10"
-            echo "# Configuring bridge interface $BRIDGE..."
+            update_progress_bar "5" "# Configuring bridge interface $BRIDGE..."
+
+            # First, check if bridge already exists and remove it
+            if nmcli connection show "$BRIDGE" &>/dev/null; then
+                update_progress_bar "10" "# Removing existing bridge connection..."
+                nmcli connection delete "$BRIDGE" &>/dev/null || true
+            fi
+            
+            # Remove any existing slave connections for this interface
+            local slave_name="${interface}-slave-$BRIDGE"
+            if nmcli connection show "$slave_name" &>/dev/null; then
+                update_progress_bar "15" "# Removing existing slave connection..."
+                nmcli connection delete "$slave_name" &>/dev/null || true
+            fi
+            sleep 2
+
+            # Get the original connection name for the interface
+            update_progress_bar "20" "# Detecting current network configuration..."
+            local original_conn=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":$interface$" | cut -d: -f1)
             
             # Create bridge
             if output=$(nmcli connection add type bridge \
                 con-name "$BRIDGE" \
                 ifname "$BRIDGE" \
+                bridge.stp no \
                 ipv4.addresses "$hostipandsub" \
                 ipv4.gateway "$gateway" \
                 ipv4.dns "$DNS" \
                 ipv4.method manual \
-                autoconnect yes 2>&1); then
-                update_progress_bar "30" "# Bridge created successfully\n$output"
+                ipv6.method disabled \
+                connection.autoconnect yes \
+                connection.autoconnect-slaves 1 2>&1); then
+                update_progress_bar "30" "# Bridge created successfully"
             else
                 update_progress_bar "100" "# Failed to create bridge: $output"
-                sleep 1
                 error_exit "Failed to create bridge: $output"
             fi
-
             sleep 2
             
             # Add ethernet interface as slave
             update_progress_bar "50" "# Adding interface $interface to bridge..."
-            local slave_name="${interface}-slave-$BRIDGE"
             if output=$(nmcli connection add type ethernet \
                 slave-type bridge \
                 con-name "$slave_name" \
                 ifname "$interface" \
-                master "$BRIDGE" 2>&1); then
-                update_progress_bar "70" "# Interface added successfully\n$output"
+                master "$BRIDGE" \
+                connection.autoconnect yes 2>&1); then
+                update_progress_bar "60" "# Interface added as bridge slave"
             else
                 update_progress_bar "100" "# Failed to add interface: $output"
-                sleep 1
                 error_exit "Failed to add interface: $output"
             fi
-
             sleep 2
+
+            # Bring down original connection if it exists
+            if [[ -n "$original_conn" ]]; then
+                update_progress_bar "70" "# Deactivating original connection..."
+                nmcli connection down "$original_conn" &>/dev/null || true
+                sleep 2
+            fi
 
             # Activate connection
             update_progress_bar "90" "# Activating network connection..."
-            if output=$(nmcli connection up "$slave_name" 2>&1); then
-                update_progress_bar "95" "# Slave interface activated\n$output"
-            else
-                update_progress_bar "100" "# Failed to activate slave interface: $output"
-                sleep 1
-                error_exit "# Failed to activate slave interface: $output"
-            fi
-
-            sleep 5
-
             if output=$(nmcli connection up "$BRIDGE" 2>&1); then
-                update_progress_bar "100" "# Bridge activated successfully\n$output"
+                update_progress_bar "90" "# Bridge activated successfully"
             else
                 update_progress_bar "100" "# Failed to activate bridge: $output"
                 sleep 1
-                error_exit "# Failed to activate bridge: $output"
+                error_exit "Failed to activate bridge: $output"
+            fi
+            sleep 5
+
+            update_progress_bar "95" "# Verifying bridge configuration..."
+            if ! ip link show "$BRIDGE" &>/dev/null; then
+                error_exit "Bridge $BRIDGE was not created successfully"
             fi
 
+            # Wait for IP assignment
+            local max_wait=10
+            local count=0
+            local expected_ip=$(echo "$hostipandsub" | cut -d'/' -f1)
+            while [[ $count -lt $max_wait ]]; do
+                if ip addr show "$BRIDGE" | grep -q "inet.*$expected_ip"; then
+                    break
+                fi
+                sleep 1
+                ((count++))
+            done
+            
+            update_progress_bar "100" "# Bridge configuration complete"
             sleep 2
+
         } | dialog --backtitle "$SCRIPT_NAME" \
                 --title "Network Configuration" \
                 --gauge "Configuring network with NetworkManager..." 10 70 0
 
         # Verify the configuration
         if ip link show "$BRIDGE" &>/dev/null; then
-            show_dialog \
-                "info" \
-                "Network Configuration" \
-                "Bridge $BRIDGE configured successfully with IP $(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)." 5
+            local bridge_ip=$(ip -4 addr show "$BRIDGE" | awk '/inet / {print $2}' | cut -d/ -f1)
+            if [[ -n "$bridge_ip" ]]; then
+                show_dialog \
+                    "info" \
+                    "Network Configuration" \
+                    "Bridge $BRIDGE configured successfully with IP $bridge_ip." 5
+            else
+                dialog --backtitle "$SCRIPT_NAME" \
+                    --title "Warning" \
+                    --msgbox "Bridge $BRIDGE created but IP address not detected.\n\nPlease verify with: ip addr show $BRIDGE" 8 70
+                return 1
+            fi
         else
             dialog --backtitle "$SCRIPT_NAME" \
                 --title "Error" \
-                --msgbox "Failed to configure bridge $BRIDGE. Check system logs." 7 60
+                --msgbox "Failed to configure bridge $BRIDGE.\n\nCheck logs with:\njournalctl -xeu NetworkManager" 8 70
             return 1
         fi
+
     else
         error_exit "Unsupported OS type: $OS_TYPE"
     fi
