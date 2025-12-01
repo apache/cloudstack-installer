@@ -1092,7 +1092,7 @@ configure_management_server_database() {
 # Function to install MySQL Server and configure it for CloudStack
 install_mysql_server() {
     MYSQL_PKG="mysql-server"
-    if [[ ("$OS_ID" == "rocky" || "$OS_ID" == "almalinux") && "$OS_MAJOR" =~ ^(10|11)$ ]]; then
+    if [[ ("$OS_TYPE" == "rocky" || "$OS_TYPE" == "almalinux") && "$OS_MAJOR" =~ ^(10|11)$ ]]; then
         MYSQL_PKG="mysql8.4-server"
     fi
     local tracker_key="mysql_installed"

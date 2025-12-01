@@ -1,9 +1,8 @@
 # [c8k.in](https://github.com/apache/cloudstack-installer): One-liner installer for [Apache CloudStack](https://cloudstack.apache.org)
 
 > [!NOTE]
-> Supports CloudStack installation on Ubuntu or EL based distro with x86_64 KVM and tested with Ubuntu 24.04 LTS (x86_64) and Rocky Linux 8. Please use this on a throwaway host or a VM (with hardware acceleration) that wouldn't hurt you to lose, in an [RFC1918 local private network](https://en.wikipedia.org/wiki/Private_network). This is currently in `beta` and open for users testing and issue reporting.
+> Supports CloudStack installation on Ubuntu or EL based distro with x86_64 KVM. It has been tested with Ubuntu 20.04, 22.04, 24.04 LTS (x86_64), Rocky Linux 8 and 9. Please use this on a throwaway host or a VM (with hardware acceleration) that wouldn't hurt you to lose, in an [RFC1918 local private network](https://en.wikipedia.org/wiki/Private_network). This is currently in `beta` and open for users testing and issue reporting.
 
-NOTE: Work in progress
 
 ### 🚀 The Easiest Way to Install Apache CloudStack on Ubuntu or EL-based Distros
 
@@ -144,6 +143,16 @@ URL: http://<management-server-ip>:8080/client
 Username: admin
 Password: password
 ```
+---
+
+## ⚠️ Common Pitfalls
+
+- Avoid pre-installing Java before running this script. Exisiting java installation can cause version conflicts and may break the installer.
+- Use a proper base image when preparing the VM. The ISO should be  at least a Minimal Installation to ensure all required packages are available.
+- Installer can't continue if any other process has lock of package manager, you may see such error:
+
+    ```Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 5774 (unattended-upgr)```
+
 ---
 
 ## 🧰 Utilities Used
