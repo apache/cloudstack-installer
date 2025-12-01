@@ -181,6 +181,7 @@ detect_os() {
     source /etc/os-release
     OS_TYPE=$ID
     OS_VERSION=$VERSION_ID
+    OS_MAJOR="${OS_VERSION%%.*}"
     VERSION_CODENAME=${VERSION_CODENAME:-}
     
     case "$OS_TYPE" in
@@ -546,6 +547,7 @@ start_service_with_progress() {
     local display_name="${2:-$service_name}"
     local start_percent="${3:-60}"
     local end_percent="${4:-90}"
+    local verify="${5:-verify}"
 
     if ! systemctl is-active --quiet "$service_name"; then
         {
@@ -567,11 +569,16 @@ start_service_with_progress() {
                    --gauge "Starting $display_name service..." 15 70 0
 
         systemctl enable "$service_name" >/dev/null 2>&1
-        if systemctl is-active --quiet "$service_name"; then
-            log "$display_name service started successfully."
+        if [[ "$verify" == "verify" ]]; then
+            if systemctl is-active --quiet "$service_name"; then
+                log "$display_name service started successfully."
+            else
+                error_exit "Failed to start $display_name service."
+            fi
         else
-            error_exit "Failed to start $display_name service."
+            log "$display_name service started (verification skipped)."
         fi
+
     else
         log "$display_name service is already running."
     fi
@@ -597,7 +604,7 @@ show_cloudstack_banner() {
     Note: Please change the default password after first login.
     "
     log "$banner"
-    
+
     dialog --backtitle "$SCRIPT_NAME" \
         --title "Installation Complete" \
         --colors \
@@ -1084,7 +1091,10 @@ configure_management_server_database() {
 
 # Function to install MySQL Server and configure it for CloudStack
 install_mysql_server() {
-    local package_name="mysql-server"
+    MYSQL_PKG="mysql-server"
+    if [[ ("$OS_ID" == "rocky" || "$OS_ID" == "almalinux") && "$OS_MAJOR" =~ ^(10|11)$ ]]; then
+        MYSQL_PKG="mysql8.4-server"
+    fi
     local tracker_key="mysql_installed"
     if is_step_tracked "$tracker_key"; then
         log "MySQL is already installed. Skipping installation."
@@ -1092,12 +1102,12 @@ install_mysql_server() {
         return 0
     fi
 
-    if is_package_installed "$package_name"; then
+    if is_package_installed "$MYSQL_PKG"; then
         log "MySQL Server is already installed."
         set_tracker_field "$tracker_key" "yes"
         return 0
     fi
-    install_pkg_with_progress_bar "MySQL Server" "$package_name" "$tracker_key"
+    install_pkg_with_progress_bar "MySQL Server" "$MYSQL_PKG" "$tracker_key"
     start_service_with_progress "$MYSQL_SERVICE" "MySQL" 60 90
 }
 
@@ -1480,7 +1490,7 @@ install_usage_server() {
     fi
 
     install_pkg_with_progress_bar "CloudStack Usage Server" "$package_name" "$tracker_key"
-    start_service_with_progress "$package_name" "CloudStack Usage" 60 90
+    start_service_with_progress "$package_name" "CloudStack Usage" 40 90 "noverify"
 }
 
 configure_usage_server() {
