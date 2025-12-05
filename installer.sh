@@ -32,6 +32,7 @@ OS_TYPE=""
 PACKAGE_MANAGER=""
 SELECTED_COMPONENTS=()
 ZONE_TYPE=""
+MYSQL_PKG="mysql-server"
 MYSQL_SERVICE=""
 MYSQL_CONF_DIR=""
 
@@ -194,6 +195,9 @@ detect_os() {
             PACKAGE_MANAGER="dnf"
             MYSQL_SERVICE="mysqld"
             MYSQL_CONF_DIR="/etc/my.cnf.d"
+            if [[ ("$OS_TYPE" == "rocky" || "$OS_TYPE" == "almalinux") && "$OS_MAJOR" =~ ^(10|11)$ ]]; then
+                MYSQL_PKG="mysql8.4-server"
+            fi
             validate_selinux
             ;;
         *)
@@ -945,9 +949,9 @@ show_components_versions() {
             
             mysql)
                 if [[ "$PACKAGE_MANAGER" == "apt" ]]; then
-                    version_info=$(apt-cache policy mysql-server 2>/dev/null | awk '/Candidate:/ {print $2}')
+                    version_info=$(apt-cache policy "$MYSQL_PKG" 2>/dev/null | awk '/Candidate:/ {print $2}')
                 elif [[ "$PACKAGE_MANAGER" == "dnf" || "$PACKAGE_MANAGER" == "yum" ]]; then
-                    version_info=$($PACKAGE_MANAGER info mysql-server 2>/dev/null | awk -F':' '/Version/ {gsub(/ /,"",$2); print $2}')
+                    version_info=$($PACKAGE_MANAGER info "$MYSQL_PKG" 2>/dev/null | awk -F':' '/Version/ {gsub(/ /,"",$2); print $2}')
                 fi
                 versions+=("MySQL Server: ${version_info:-Not Available}\n")
                 ;;
@@ -1020,7 +1024,7 @@ configure_management_server_database() {
 
     local db_user="cloud"
     local db_pass="cloud"
-    if [[ -f "/etc/cloudstack/management/db.properties" ]]; then
+    if [[ -f "/etc/cloudstack/management/db.properties" ]] && is_step_tracked "$tracker_key"; then
         if mysql -u"$db_user" -p"$db_pass" -e "USE cloud; SHOW TABLES LIKE 'version';" &>/dev/null; then
             local current_db_host=$(grep "^cluster.node.IP" /etc/cloudstack/management/db.properties | cut -d= -f2)
             if ! dialog --title "Info" --yesno "CloudStack database appears to be already configured.\nCurrent database host: $current_db_host\n\nDo you want to reconfigure it?" 10 60; then
@@ -1091,10 +1095,6 @@ configure_management_server_database() {
 
 # Function to install MySQL Server and configure it for CloudStack
 install_mysql_server() {
-    MYSQL_PKG="mysql-server"
-    if [[ ("$OS_TYPE" == "rocky" || "$OS_TYPE" == "almalinux") && "$OS_MAJOR" =~ ^(10|11)$ ]]; then
-        MYSQL_PKG="mysql8.4-server"
-    fi
     local tracker_key="mysql_installed"
     if is_step_tracked "$tracker_key"; then
         log "MySQL is already installed. Skipping installation."
