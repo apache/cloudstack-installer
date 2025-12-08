@@ -52,6 +52,7 @@ One-liners installer automates and simplifies the installation and configuration
 | Rocky    | 9       | ✔️ Validated |
 | Rocky    | 8       | ✔️ Validated |
 | Alma     | 9       | ✔️ Validated |
+| Alma     | 8       | ✔️ Validated |
 
 ---
 
