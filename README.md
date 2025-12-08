@@ -145,13 +145,15 @@ Password: password
 ```
 ---
 
-## ⚠️ Common Pitfalls
+## ⚠️ Notes/Common Pitfalls
 
 - Avoid pre-installing Java before running this script. Exisiting java installation can cause version conflicts and may break the installer.
 - Use a proper base image when preparing the VM. The ISO should be  at least a Minimal Installation to ensure all required packages are available.
 - Installer can't continue if any other process has lock of package manager, you may see such error:
 
     ```Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 5774 (unattended-upgr)```
+
+- Zone Deployment form provides default parameters optimized for an all-in-one CloudStack installation. Review and adjust these values as needed for your deployment.
 
 ---
 
