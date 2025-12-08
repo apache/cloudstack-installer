@@ -1,7 +1,7 @@
 # [c8k.in](https://github.com/apache/cloudstack-installer): One-liner installer for [Apache CloudStack](https://cloudstack.apache.org)
 
 > [!NOTE]
-> Supports Apache CloudStack (version >= 4.20) installation on Ubuntu or EL based distro with x86_64 KVM. It has been tested with Ubuntu 20.04, 22.04, 24.04 LTS (x86_64), Rocky Linux 8 and 9. Please use this on a throwaway host or a VM (with hardware acceleration) that wouldn't hurt you to lose, in an [RFC1918 local private network](https://en.wikipedia.org/wiki/Private_network). This is currently in `beta` and open for users testing and issue reporting.
+> Supports Apache CloudStack (version >= 4.20) installation on Ubuntu or EL based distro with x86_64 KVM. Please use this on a throwaway host or a VM (with hardware acceleration) that wouldn't hurt you to lose, in an [RFC1918 local private network](https://en.wikipedia.org/wiki/Private_network). This is currently in `beta` and open for users testing and issue reporting.
 
 
 ### 🚀 The Easiest Way to Install Apache CloudStack on Ubuntu or EL-based Distros
@@ -38,9 +38,20 @@ One-liners installer automates and simplifies the installation and configuration
 | **Privileges** | Root / `sudo` |
 | **Virtualization** | Hardware virtualization (Intel VT-x / AMD-V) |
 
-Supported Operating Systems:
-- Ubuntu 20.04+, Debian 11+
-- RHEL 8+/CentOS/AlmaLinux/RockyLinux
+---
+
+## ✅ Validated Operating Systems
+
+| OS       | Version | Status |
+|----------|---------|--------|
+| Oracle   | 9       | ✔️ Validated |
+| Oracle   | 8       | ✔️ Validated |
+| Ubuntu   | 24.04   | ✔️ Validated |
+| Ubuntu   | 22.04   | ✔️ Validated |
+| Ubuntu   | 20.04   | ✔️ Validated |
+| Rocky    | 9       | ✔️ Validated |
+| Rocky    | 8       | ✔️ Validated |
+| Alma     | 9       | ✔️ Validated |
 
 ---
 
