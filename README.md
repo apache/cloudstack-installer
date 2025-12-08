@@ -1,7 +1,7 @@
 # [c8k.in](https://github.com/apache/cloudstack-installer): One-liner installer for [Apache CloudStack](https://cloudstack.apache.org)
 
 > [!NOTE]
-> Supports CloudStack installation on Ubuntu or EL based distro with x86_64 KVM. It has been tested with Ubuntu 20.04, 22.04, 24.04 LTS (x86_64), Rocky Linux 8 and 9. Please use this on a throwaway host or a VM (with hardware acceleration) that wouldn't hurt you to lose, in an [RFC1918 local private network](https://en.wikipedia.org/wiki/Private_network). This is currently in `beta` and open for users testing and issue reporting.
+> Supports Apache CloudStack (version >= 4.20) installation on Ubuntu or EL based distro with x86_64 KVM. It has been tested with Ubuntu 20.04, 22.04, 24.04 LTS (x86_64), Rocky Linux 8 and 9. Please use this on a throwaway host or a VM (with hardware acceleration) that wouldn't hurt you to lose, in an [RFC1918 local private network](https://en.wikipedia.org/wiki/Private_network). This is currently in `beta` and open for users testing and issue reporting.
 
 
 ### 🚀 The Easiest Way to Install Apache CloudStack on Ubuntu or EL-based Distros

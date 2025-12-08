@@ -115,7 +115,7 @@ check_system_resources() {
 
     # Check if RAM is within the desired range
     if [ "$TOTAL_RAM_KB" -ge "$MIN_RAM_KB" ]; then
-        success_msg "RAM check passed: $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB"
+        success_msg "✓ RAM check passed: $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB"
     else
         error_exit "RAM check failed: System has $(awk "BEGIN {printf \"%.2f\", $TOTAL_RAM_KB/1024/1024}") GB RAM"
     fi
@@ -125,7 +125,7 @@ check_system_resources() {
 
     # Check if disk space is within the desired range
     if [ "$TOTAL_DISK_GB" -ge "$MIN_DISK_GB" ]; then
-        success_msg "Disk space check passed: $TOTAL_DISK_GB GB available"
+        success_msg "✓ Disk space check passed: $TOTAL_DISK_GB GB available"
     else
         error_exit "Disk space check failed: System has only $TOTAL_DISK_GB GB available"
     fi
@@ -166,11 +166,25 @@ validate_selinux() {
             msg+="\n  3) Reboot"
             error_exit "$msg"
         else
-            success_msg "SELinux status: $SELINUX_MODE"
+            success_msg "✓ SELinux status: $SELINUX_MODE"
         fi
     else
-        success_msg "SELinux not detected. Continuing..."
+        success_msg "✓ SELinux not detected. Continuing..."
     fi
+}
+
+validate_jre_version() {
+    if ! command -v java >/dev/null 2>&1; then
+        success_msg "✓ Java not found, good to go.."
+        return 0
+    fi
+    java_version=$(java -version 2>&1 | awk -F[\"_] 'NR==1{print $2}')
+    major_version=$(echo "$java_version" | cut -d. -f1)
+
+    if [[ "$major_version" != "17" ]]; then
+        error_exit "Looks like java is pre-installed, may conflict with CloudStack. Java 17 is required. Detected version: $java_version" >&2
+    fi
+    success_msg "✓ Java version $java_version detected, good to go.."
 }
 
 # Initialize OS_TYPE, PACKAGE_MANAGER, MYSQL_SERVICE, MYSQL_CONF_DIR
@@ -2407,6 +2421,7 @@ validate_system_resources() {
     check_root
     check_kvm_support
     check_system_resources
+    validate_jre_version
 }
 
 # Configure prerequisites before installation
