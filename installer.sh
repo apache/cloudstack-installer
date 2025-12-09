@@ -149,7 +149,7 @@ check_kvm_support() {
 
     modprobe "$MODULE" 2>/dev/null || true
     # Validate loaded module
-    if ! lsmod | grep -q "$MODULE"; then
+    if ! grep -q "^${MODULE} " /proc/modules; then
         error_exit "KVM module $MODULE is not loaded. Ensure virtualization is enabled in BIOS/UEFI."
     fi
     success_msg "✓ KVM kernel module ($MODULE) loaded"
