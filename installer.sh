@@ -209,7 +209,7 @@ detect_os() {
             PACKAGE_MANAGER="dnf"
             MYSQL_SERVICE="mysqld"
             MYSQL_CONF_DIR="/etc/my.cnf.d"
-            if [[ ("$OS_TYPE" == "rocky" || "$OS_TYPE" == "almalinux") && "$OS_MAJOR" =~ ^(10|11)$ ]]; then
+            if [[ ("$OS_TYPE" == "rocky" || "$OS_TYPE" == "almalinux" || "$OS_TYPE" == "ol") && "$OS_MAJOR" =~ ^(10|11)$ ]]; then
                 MYSQL_PKG="mysql8.4-server"
             fi
             validate_selinux

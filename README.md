@@ -54,6 +54,23 @@ One-liners installer automates and simplifies the installation and configuration
 | Alma     | 9       | ✔️ Validated |
 | Alma     | 8       | ✔️ Validated |
 
+### NOTE: EL10 Distributions (Experimental)
+Oracle Linux 10, AlmaLinux 10, and Rocky Linux 10 are supported **only** with CloudStack 4.22.0.0 or later.  
+#### Prerequisites - run before the installer
+
+##### AlmaLinux 10 / Rocky Linux 10
+
+```bash
+sudo dnf install -y epel-release
+sudo dnf install -y genisoimage
+```
+##### Oracle Linux 10
+
+```bash
+sudo dnf install -y epel-release
+sudo dnf install -y genisoimage
+```
+
 ---
 
 ## 📦 Installation
