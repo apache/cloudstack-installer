@@ -181,8 +181,8 @@ validate_jre_version() {
     java_version=$(java -version 2>&1 | awk -F[\"_] 'NR==1{print $2}')
     major_version=$(echo "$java_version" | cut -d. -f1)
 
-    if [[ "$major_version" != "17" ]]; then
-        error_exit "Looks like java is pre-installed, may conflict with CloudStack. Java 17 is required. Detected version: $java_version" >&2
+    if (( major_version < 17 )); then
+        error_exit "Looks like Java is pre-installed and may conflict with CloudStack. Java 17 or higher is required. Detected version: $java_version"
     fi
     success_msg "✓ Java version $java_version detected, good to go.."
 }
@@ -1498,7 +1498,7 @@ install_usage_server() {
     fi
 
     # check if mysql and management server are installed
-    if ! is_package_installed "cloudstack-management" "mysql-server"; then
+    if ! is_package_installed "cloudstack-management" "$MYSQL_PKG"; then
         error_exit "CloudStack Management Server and MySQL Server must be installed before installing the Usage Server."
     fi
 
