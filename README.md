@@ -67,7 +67,7 @@ sudo dnf install -y genisoimage
 ##### Oracle Linux 10
 
 ```bash
-sudo dnf install -y epel-release
+sudo dnf install -y oracle-epel-release-el10
 sudo dnf install -y genisoimage
 ```
 

@@ -1000,6 +1000,40 @@ show_components_versions() {
     show_dialog info "Component Versions" "Available versions from repository:\n\n$(printf '%s\n' "${versions[@]}")" 6 10 55
 }
 
+cmk_api_call() {
+    local jq_filter="$1"
+    shift 1
+    local cmd=(cmk "$@")     # remaining args are the CMK call
+
+    # Run the CMK API call (capture stdout+stderr)
+    local cmd_output
+    cmd_output="$("${cmd[@]}" 2>&1)"
+    if ! echo "$cmd_output" | jq empty >/dev/null 2>&1; then
+        log "cmk API returned non-JSON response: $cmd_output"
+        return 1
+    fi
+    
+    # Extract value
+    local value
+    value=$(echo "$cmd_output" | jq -r "$jq_filter // empty")
+    # if value is empty
+    if [[ -z "$value" ]]; then
+        log "cmk returned empty value for jq filter: '$jq_filter' on output: $cmd_output"
+        return 1
+    fi
+    echo "$value"
+    return 0
+}
+
+cmk_api_fail_dialog_msg() {
+    local msg="$1"
+    local progress="${2:-100}"
+    local sleep_time="${3:-4}"
+    update_progress_bar "$progress" "$msg"
+    sleep "$sleep_time"
+    return 1
+}
+
 # Component installation and configuration functions
 #-------------------------------------------------------------------------------
 
@@ -1118,9 +1152,9 @@ install_mysql_server() {
     if is_package_installed "$MYSQL_PKG"; then
         log "MySQL Server is already installed."
         set_tracker_field "$tracker_key" "yes"
-        return 0
+    else
+        install_pkg_with_progress_bar "MySQL Server" "$MYSQL_PKG" "$tracker_key"
     fi
-    install_pkg_with_progress_bar "MySQL Server" "$MYSQL_PKG" "$tracker_key"
     start_service_with_progress "$MYSQL_SERVICE" "MySQL" 60 90
 }
 
@@ -1186,13 +1220,6 @@ install_nfs_server() {
         return 0
     fi
 
-    if command -v exportfs &>/dev/null; then
-        log "NFS Server is already installed."
-        set_tracker_field "$tracker_key" "yes"
-        show_dialog "info" "NFS Server Installation" "NFS Server is already installed.\n\nSkipping installation."
-        return 0
-    fi
-
     local package_name=""
     local nfs_svc="nfs-server"
     case "$PACKAGE_MANAGER" in
@@ -1204,7 +1231,13 @@ install_nfs_server() {
             package_name="nfs-utils quota"
             ;;
     esac
-    install_pkg_with_progress_bar "NFS Server" "$package_name" "$tracker_key"
+    if is_package_installed "$package_name"; then
+        log "NFS Server is already installed."
+        show_dialog "info" "NFS Server Installation" "NFS Server is already installed.\n\nSkipping installation."
+        set_tracker_field "$tracker_key" "yes"
+    else
+        install_pkg_with_progress_bar "NFS Server" "$package_name" "$tracker_key"
+    fi
     start_service_with_progress "$nfs_svc" "NFS" 60 90
 }
 
@@ -1957,19 +1990,14 @@ deploy_zone() {
             log "Zone already deployed with ID: $zone_id"
         else
             update_progress_bar "10" "# Starting Zone deployment..."
-            zone_output=$(cmk create zone name="${zone_name}" \
+            zone_id=$(cmk_api_call '.zone.id' create zone name="${zone_name}" \
                 networktype="$network_type" \
                 dns1="$DNS" \
                 internaldns1="$DNS" \
                 localstorageenabled=true \
                 securitygroupenabled=false \
-                guestcidraddress="$guest_cidr")
-
-            if ! zone_id=$(echo "$zone_output" | jq -r '.zone.id' 2>/dev/null); then
-                update_progress_bar "100" "Failed to Create Zone"
-                sleep 4
-                error_exit "Failed to create zone: $zone_output"
-            fi
+                guestcidraddress="$guest_cidr") || \
+                cmk_api_fail_dialog_msg "Failed to create zone"
         fi
         set_tracker_field "zone_id" "$zone_id"
         
@@ -1978,20 +2006,17 @@ deploy_zone() {
             log "Physical Network already created with ID: $physicalnetwork_id"
         else
             update_progress_bar "20" "# Creating Physical Network..."
-            physicalnetwork_output=$(cmk create physicalnetwork name="$phy_name" \
+            physicalnetwork_id=$(cmk_api_call '.physicalnetwork.id' create physicalnetwork name="$phy_name" \
                 zoneid="$zone_id" \
-                isolationmethods="VLAN")
-            if ! physicalnetwork_id=$(echo "$physicalnetwork_output" | jq -r '.physicalnetwork.id' 2>/dev/null); then
-                update_progress_bar "100" "Failed to Physical Network"
-                sleep 4
-                error_exit "Failed to create physical network: $physicalnetwork_output" 
-            fi
+                isolationmethods="VLAN") || \
+                cmk_api_fail_dialog_msg "Failed to create physical network"
+
             set_tracker_field "physicalnetwork_id" "$physicalnetwork_id"
             # Add Traffic Types
             update_progress_bar "30" "# Adding Traffic Types..."
-            cmk add traffictype traffictype=Management physicalnetworkid="$physicalnetwork_id"
-            cmk add traffictype traffictype=Guest physicalnetworkid="$physicalnetwork_id"
-            cmk add traffictype traffictype=Public physicalnetworkid="$physicalnetwork_id"
+            cmk add traffictype traffictype=Management physicalnetworkid="$physicalnetwork_id" >/dev/null 2>&1
+            cmk add traffictype traffictype=Guest physicalnetworkid="$physicalnetwork_id" >/dev/null 2>&1
+            cmk add traffictype traffictype=Public physicalnetworkid="$physicalnetwork_id" >/dev/null 2>&1
         fi
 
         local vlan_ip_range_id=$(get_tracker_field "vlan_ip_range_id")
@@ -1999,50 +2024,42 @@ deploy_zone() {
             log "VLAN IP Range already added with ID: $vlan_ip_range_id"
         else
             update_progress_bar "35" "# Adding IP Ranges..."
-            vlan_ip_range_output=$(cmk create vlaniprange \
+            vlan_ip_range_id=$(cmk_api_call '.vlan.id' create vlaniprange \
                 zoneid="$zone_id" \
                 vlan=untagged \
                 gateway="$GATEWAY" \
                 netmask="$NETMASK" \
                 startip="$public_start" \
                 endip="$public_end" \
-                forvirtualnetwork=true)
-
-            if ! vlan_ip_range_id=$(echo "$vlan_ip_range_output" | jq -r '.vlan.id' 2>/dev/null); then
-                update_progress_bar "100" "Failed to add Public IP range"
-                error_exit "Failed to add Public IP range: $vlan_ip_range_output"
-            fi
+                forvirtualnetwork=true) || \
+                fail_with_dialog_msg "Failed to add Public IP range"
             set_tracker_field "vlan_ip_range_id" "$vlan_ip_range_id"
         fi
 
         update_progress_bar "38" "# Configuring Physical network with VLAN range..."
-        cmk update physicalnetwork id=$physicalnetwork_id vlan=$vlan_range
+        cmk update physicalnetwork id=$physicalnetwork_id vlan=$vlan_range >/dev/null 2>&1
 
         update_progress_bar "40" "# Configuring Physical network state..."
-        cmk update physicalnetwork state=Enabled id="$physicalnetwork_id"
+        cmk update physicalnetwork state=Enabled id="$physicalnetwork_id" >/dev/null 2>&1
         local nsp_id=$(cmk list networkserviceproviders name=VirtualRouter physicalnetworkid="$physicalnetwork_id" | jq -r '.networkserviceprovider[0].id')
         local vre_id=$(cmk list virtualrouterelements nspid="$nsp_id" | jq -r '.virtualrouterelement[0].id')
         
         update_progress_bar "45" "# Configuring Physical network services..."
-        cmk configure virtualrouterelement enabled=true id="$vre_id"
-        cmk update networkserviceprovider state=Enabled id="$nsp_id"
+        cmk configure virtualrouterelement enabled=true id="$vre_id" >/dev/null 2>&1
+        cmk update networkserviceprovider state=Enabled id="$nsp_id" >/dev/null 2>&1
         
         pod_id=$(get_tracker_field "pod_id")
         if [[ -n "$pod_id" ]]; then
             log "Pod already created with ID: $pod_id"
         else
             update_progress_bar "50" "# Creating Pod..."
-            pod_output=$(cmk create pod name="$pod_name" \
+            pod_id=$(cmk_api_call '.pod.id' create pod name="$pod_name" \
                 zoneid="$zone_id" \
                 gateway="$GATEWAY" \
                 netmask="$NETMASK" \
                 startip="$pod_start" \
-                endip="$pod_end")
-            if ! pod_id=$(echo "$pod_output" | jq -r '.pod.id' 2>/dev/null); then
-                update_progress_bar "100" "Failed to create Pod"
-                sleep 4
-                error_exit "Failed to create pod: $pod_output"
-            fi
+                endip="$pod_end") || \
+                fail_with_dialog_msg "Failed to create Pod"
             set_tracker_field "pod_id" "$pod_id"
         fi
         
@@ -2051,18 +2068,13 @@ deploy_zone() {
             log "Cluster already created with ID: $cluster_id"
         else
             update_progress_bar "60" "# Adding Cluster..."
-            cluster_output=$(cmk add cluster \
+            cluster_id=$(cmk_api_call '.cluster[0].id' add cluster \
                 zoneid="$zone_id" \
                 podid="$pod_id" \
                 clustername="$cluster_name" \
                 clustertype=CloudManaged \
-                hypervisor=KVM)
-            cluster_id=$(echo "$cluster_output" | jq -r '.cluster[0].id' 2>/dev/null)
-            if [[ -z "$cluster_id" ]]; then
-                update_progress_bar "100" "Failed to add cluster"
-                sleep 4
-                error_exit "Failed to add cluster: $cluster_output"
-            fi
+                hypervisor=KVM)|| \
+                fail_with_dialog_msg "Failed to add Cluster"
             set_tracker_field "cluster_id" "$cluster_id"
         fi
         
@@ -2071,19 +2083,14 @@ deploy_zone() {
             log "Host already created with ID: $host_id"
         else
             update_progress_bar "70" "# Adding Host..."
-            add_host_output=$(cmk add host zoneid="$zone_id" \
+            host_id=$(cmk_api_call '.host[0].id' add host zoneid="$zone_id" \
                 podid="$pod_id" \
                 clusterid="$cluster_id" \
                 hypervisor=KVM \
                 username=root \
                 password="$root_pass" \
-                url="http://$KVM_HOST_IP")
-            host_id=$(echo "$add_host_output" | jq -r '.host[0].id' 2>/dev/null)
-            if [[ -z "$host_id" ]]; then
-                update_progress_bar "100" "Failed to add host"
-                sleep 4
-                error_exit "Failed to add host: $add_host_output"
-            fi
+                url="http://$KVM_HOST_IP")|| \
+                cmk_api_fail_dialog_msg "Failed to add Host"
             set_tracker_field "host_id" "$host_id"
         fi
         
@@ -2092,19 +2099,14 @@ deploy_zone() {
             log "Primary Storage already added with ID: $primary_storage_id"
         else
             update_progress_bar "80" "# Adding Primary Storage..."
-            primary_storage_output=$(cmk create storagepool name="$primary_name" \
+            primary_storage_id=$(cmk_api_call '.storagepool.id' create storagepool name="$primary_name" \
                 zoneid="$zone_id" \
                 podid="$pod_id" \
                 clusterid="$cluster_id" \
                 url="nfs://$nfs_server$primary_path" \
                 hypervisor=KVM \
-                scope=zone)
-            primary_storage_id=$(echo "$primary_storage_output" | jq -r '.storagepool.id' 2>/dev/null)
-            if [[ -z "$primary_storage_id" ]]; then
-                update_progress_bar "100" "Failed to add Primary Storage"
-                sleep 4
-                error_exit "Failed to add Primary Storage: $primary_storage_output"
-            fi
+                scope=zone) || \
+                cmk_api_fail_dialog_msg "Failed to add Primary Storage"
             set_tracker_field "primary_storage_id" "$primary_storage_id"
         fi
         
@@ -2113,21 +2115,16 @@ deploy_zone() {
             log "Secondary Storage already added with ID: $secondary_storage_id"
         else
             update_progress_bar "90" "# Add Secondary Storage..."
-            secondary_storage_output=$(cmk add imagestore name="$secondary_name" \
+            secondary_storage_id=$(cmk_api_call '.imagestore.id' add imagestore name="$secondary_name" \
                 zoneid="$zone_id" \
                 url="nfs://$nfs_server$secondary_path" \
-                provider=NFS)
-            secondary_storage_id=$(echo "$secondary_storage_output" | jq -r '.imagestore.id' 2>/dev/null)
-            if [[ -z "$secondary_storage_id" ]]; then
-                update_progress_bar "100" "Failed to add Secondary Storage"
-                sleep 4
-                error_exit "Failed to add Secondary Storage: $secondary_storage_output"
-            fi
+                provider=NFS) || \
+                cmk_api_fail_dialog_msg "Failed to add Secondary Storage"
             set_tracker_field "secondary_storage_id" "$secondary_storage_id"
         fi
 
         update_progress_bar "95" "# Enabling Zone..."
-        cmk update zone allocationstate=Enabled id="$zone_id"
+        cmk update zone allocationstate=Enabled id="$zone_id" >/dev/null 2>&1
         
         update_progress_bar "100" "# Zone deployment completed successfully!"
     } | dialog --backtitle "$SCRIPT_NAME" \
@@ -2295,7 +2292,7 @@ EOF
             # Activate connection
             update_progress_bar "90" "# Activating network connection..."
             if output=$(nmcli connection up "$BRIDGE" 2>&1); then
-                update_progress_bar "90" "# Bridge activated successfully"
+                update_progress_bar "92" "# Bridge activated successfully"
             else
                 update_progress_bar "100" "# Failed to activate bridge: $output"
                 sleep 1
