@@ -80,15 +80,15 @@ To install and deploy [CloudStack](https://cloudstack.apache.org), just copy and
 ### Quick Install
 
 ```bash
-curl -sSfL https://c8k.in/installer.sh | bash
+curl -sSfL https://c8k.in/stall.sh | bash
 ```
 
 ### Download and Run
 
 ```bash
-wget https://c8k.in/installer.sh
-chmod +x installer.sh
-sudo ./installer.sh
+curl -o install.sh https://c8k.in/stall.sh
+chmod +x install.sh
+sudo ./install.sh
 ```
 
 ---
