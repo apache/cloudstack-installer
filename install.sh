@@ -1858,14 +1858,26 @@ deploy_zone() {
     local network="${HOST_IP%.*}.0/24"
     # Find IPs for different purposes
     local public_ips=($(find_free_ip_range "$network" 11 20))  # 20 IPs for public
-    local pod_ips=($(find_free_ip_range "$network" 41 20))     # 20 IPs for pod
+    if [[ ${#public_ips[@]} -eq 0 ]]; then
+        error_exit "No free public IPs found in $network"
+    fi
+    local last_public_ip="${public_ips[-1]}"
+    local last_public_octet="${last_public_ip##*.}"
+    local pod_start=$((last_public_octet + 1))
+    if (( pod_start >= 255 )); then
+        error_exit "Not enough IP space to allocate pod IPs"
+    fi
+    local pod_ips=($(find_free_ip_range "$network" "$pod_start" 20)) # 20 IPs for pod
+    if [[ ${#pod_ips[@]} -eq 0 ]]; then
+        error_exit "No free pod IPs found in $network"
+    fi
 
     # Default values
     local defaults=(
         "Zone Name" "Zone1"
         "Guest CIDR" "172.16.1.0/24"
         "Public Start IP" "${public_ips[0]}"
-        "Public End IP" "${public_ips[-1]}"
+        "Public End IP" "$last_public_ip"
         "Pod Start IP" "${pod_ips[0]}"
         "Pod End IP" "${pod_ips[-1]}"
         "VLAN Range" "100-200"
@@ -2032,7 +2044,7 @@ deploy_zone() {
                 startip="$public_start" \
                 endip="$public_end" \
                 forvirtualnetwork=true) || \
-                fail_with_dialog_msg "Failed to add Public IP range"
+                cmk_api_fail_dialog_msg "Failed to add Public IP range"
             set_tracker_field "vlan_ip_range_id" "$vlan_ip_range_id"
         fi
 
@@ -2059,7 +2071,7 @@ deploy_zone() {
                 netmask="$NETMASK" \
                 startip="$pod_start" \
                 endip="$pod_end") || \
-                fail_with_dialog_msg "Failed to create Pod"
+                cmk_api_fail_dialog_msg "Failed to create Pod"
             set_tracker_field "pod_id" "$pod_id"
         fi
         
@@ -2074,7 +2086,7 @@ deploy_zone() {
                 clustername="$cluster_name" \
                 clustertype=CloudManaged \
                 hypervisor=KVM)|| \
-                fail_with_dialog_msg "Failed to add Cluster"
+                cmk_api_fail_dialog_msg "Failed to add Cluster"
             set_tracker_field "cluster_id" "$cluster_id"
         fi
         

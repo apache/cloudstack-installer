@@ -38,6 +38,9 @@ One-liners installer automates and simplifies the installation and configuration
 | **Privileges** | Root / `sudo` |
 | **Virtualization** | Hardware virtualization (Intel VT-x / AMD-V) |
 
+> ⚠️ **Important:** During zone deployment, the installer will connect to KVM hosts via SSH.
+> Make sure **root SSH login with password** is enabled on any KVM host you want to add.
+
 ---
 
 ## ✅ Validated Operating Systems
@@ -80,7 +83,7 @@ To install and deploy [CloudStack](https://cloudstack.apache.org), just copy and
 ### Quick Install
 
 ```bash
-curl -sSfL https://c8k.in/stall.sh | bash
+curl -sSfL https://c8k.in/stall.sh | sudo bash
 ```
 
 ### Download and Run
