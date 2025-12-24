@@ -19,7 +19,7 @@
 ---
 github:
   description: "Script based installer for new users trying out Apache CloudStack"
-  homepage: https://c8k.in
+  homepage: https://get.cloudstack.cloud
   labels:
     - cloudstack
     - infrastructure
@@ -42,6 +42,7 @@ github:
 
   collaborators:
     - abh1sar
+    - sudo87
     - acs-robot
 
   protected_branches: ~
