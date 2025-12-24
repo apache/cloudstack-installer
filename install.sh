@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# c8k.in/stall.sh - Easiest Apache CloudStack Installer
+# get.cloudstack.cloud/install.sh - Easiest Apache CloudStack Installer
 # Install with this command (from your Ubuntu/EL host):
 #
-# curl -sSfL https://c8k.in/stall.sh | bash
+# curl -sSfL https://get.cloudstack.cloud/install.sh | bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
