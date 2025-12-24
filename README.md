@@ -3,6 +3,13 @@
 > [!NOTE]
 > Supports Apache CloudStack (version >= 4.20) installation on Ubuntu or EL based distro with x86_64 KVM. Please use this on a throwaway host or a VM (with hardware acceleration) that wouldn't hurt you to lose, in an [RFC1918 local private network](https://en.wikipedia.org/wiki/Private_network). This is currently in `beta` and open for users testing and issue reporting.
 
+### Quick Install
+
+To install and deploy [CloudStack](https://cloudstack.apache.org), just copy and run the following as `root` user:
+
+```bash
+curl -sSfL https://get.cloudstack.cloud/install.sh | sudo bash
+```
 
 ### 🚀 The Easiest Way to Install Apache CloudStack on Ubuntu or EL-based Distros
 
