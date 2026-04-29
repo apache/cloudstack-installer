@@ -774,7 +774,7 @@ configure_cloudstack_repo() {
     if [[ -z "$repo_entry" ]]; then
         # Set default repo_entry based on OS
         local default_repo_url="https://download.cloudstack.org"
-        local default_cs_version="4.21"
+        local default_cs_version="4.22"
         # Build default repo_entry depending on distro
         case "$OS_TYPE" in
             ubuntu|debian)
@@ -797,7 +797,7 @@ configure_cloudstack_repo() {
         width=60
         prompt_text="Enter the CloudStack repository url:"
         if [[ "$OS_TYPE" =~ ^(ubuntu|debian)$ ]]; then
-            prompt_text="Enter the CloudStack repository url.\n\nSupported formats:\n• Ubuntu-style (deb ... ubuntu codename version)\n• Flat layout (deb ... /)\nExample: deb [signed-by=...] http://packages.shapeblue.com/cloudstack/upstream/debian/4.21/ /"
+            prompt_text="Enter the CloudStack repository url.\n\nSupported formats:\n• Ubuntu-style (deb ... ubuntu codename version)\n• Flat layout (deb ... /)\nExample: deb [signed-by=...] http://packages.shapeblue.com/cloudstack/upstream/debian/4.22/ /"
             width=90
         fi
         height=$(( $(echo -e "$prompt_text" | wc -l) + 8 ))
